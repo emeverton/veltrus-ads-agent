@@ -1,0 +1,45 @@
+# Ambiente Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Variáveis de ambiente
+.env
+.env.local
+.env.*.local
+
+# Next.js
+dashboard/.next/
+dashboard/out/
+dashboard/node_modules/
+dashboard/.env.local
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Credenciais Google Ads
+google-ads.yaml
+credentials.json
+token.json
+
+# Supabase local
+.branches/
+supabase/.temp/.env

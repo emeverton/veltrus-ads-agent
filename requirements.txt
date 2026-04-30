@@ -1,0 +1,48 @@
+# LangGraph & LangChain
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-anthropic>=0.3.0
+langchain-community>=0.3.0
+
+# Anthropic
+anthropic>=0.40.0
+
+# FastAPI & servidor
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+websockets>=13.0
+python-multipart>=0.0.12
+httpx>=0.28.0
+
+# Supabase
+supabase>=2.9.0
+postgrest>=0.17.0
+
+# Meta Ads (Facebook Business SDK)
+facebook-business>=21.0.0
+
+# Google Ads
+google-ads>=25.0.0
+google-auth>=2.36.0
+google-auth-oauthlib>=1.2.0
+
+# Validação e configuração
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+python-dotenv>=1.0.0
+
+# Agendamento e tarefas assíncronas
+apscheduler>=3.10.0
+celery>=5.4.0
+redis>=5.2.0
+
+# Utilitários
+tenacity>=9.0.0
+structlog>=24.4.0
+rich>=13.9.0
+python-dateutil>=2.9.0
+
+# Testes
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+pytest-mock>=3.14.0
