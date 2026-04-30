@@ -246,7 +246,6 @@ async def update_campaign_budget(
     campaign = Campaign(campaign_id)
     result = _retry(
         campaign.remote_update,
-        fields=[],
         params={"daily_budget": budget_cents},
     )
 
@@ -270,7 +269,6 @@ async def pause_campaign(campaign_id: str, access_token: str) -> dict[str, Any]:
     campaign = Campaign(campaign_id)
     result = _retry(
         campaign.remote_update,
-        fields=[],
         params={"status": Campaign.Status.paused},
     )
 
@@ -289,7 +287,6 @@ async def activate_campaign(campaign_id: str, access_token: str) -> dict[str, An
     campaign = Campaign(campaign_id)
     result = _retry(
         campaign.remote_update,
-        fields=[],
         params={"status": Campaign.Status.active},
     )
 
