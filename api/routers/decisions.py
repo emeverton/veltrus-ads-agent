@@ -118,11 +118,17 @@ async def _execute_action(
             return await meta_ads.activate_campaign(campaign_external_id, token)
 
         if action_type in ("budget_increase", "budget_decrease"):
-            budget = payload.get("daily_budget_usd") or payload.get("params", {}).get("daily_budget_usd")
+            params = payload.get("params") or {}
+            budget = (
+                payload.get("daily_budget_usd")
+                or payload.get("new_budget_usd")
+                or params.get("daily_budget_usd")
+                or params.get("new_budget_usd")
+            )
             if budget is None:
                 raise HTTPException(
                     status_code=422,
-                    detail="payload.daily_budget_usd required for budget actions",
+                    detail="payload must contain daily_budget_usd or new_budget_usd",
                 )
             return await meta_ads.update_campaign_budget(campaign_external_id, float(budget), token)
 
@@ -142,12 +148,13 @@ async def _execute_action(
             return await google_ads.activate_campaign(customer_id, campaign_external_id, credentials)
 
         if action_type in ("budget_increase", "budget_decrease"):
-            budget_id = payload.get("campaign_budget_id")
-            amount_micros = payload.get("amount_micros")
+            params = payload.get("params") or {}
+            budget_id = payload.get("campaign_budget_id") or params.get("campaign_budget_id")
+            amount_micros = payload.get("amount_micros") or params.get("amount_micros")
             if not budget_id or amount_micros is None:
                 raise HTTPException(
                     status_code=422,
-                    detail="payload.campaign_budget_id and payload.amount_micros required",
+                    detail="payload must contain campaign_budget_id and amount_micros",
                 )
             return await google_ads.update_campaign_budget(
                 customer_id, budget_id, int(amount_micros), credentials
