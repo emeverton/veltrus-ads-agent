@@ -160,9 +160,22 @@ async def _execute_action(
 
 
 def _format_decision(row: dict[str, Any]) -> dict[str, Any]:
-    campaign   = row.pop("campaigns", {}) or {}
-    ad_account = campaign.pop("ad_accounts", {}) or {}
-    # remove token from response
+    campaign_raw = row.pop("campaigns", None) or {}
+
+    # PostgREST retorna "belongs-to" como objeto e "has-many" como lista.
+    # Se o schema cache estiver desatualizado ele pode retornar lista mesmo para
+    # um relacionamento muitos-para-um — tratamos os dois casos.
+    if isinstance(campaign_raw, list):
+        campaign = campaign_raw[0] if campaign_raw else {}
+    else:
+        campaign = campaign_raw
+
+    ad_account_raw = campaign.pop("ad_accounts", None) if isinstance(campaign, dict) else None
+    if isinstance(ad_account_raw, list):
+        ad_account: dict[str, Any] = ad_account_raw[0] if ad_account_raw else {}
+    else:
+        ad_account = ad_account_raw or {}
+
     ad_account.pop("token", None)
     return {**row, "campaign": campaign, "ad_account": ad_account}
 
@@ -175,17 +188,22 @@ async def list_pending_decisions(
     _key: str = Depends(_require_api_key),
 ) -> list[dict[str, Any]]:
     """Lista decisões pendentes de aprovação humana (executed=false, não rejeitadas)."""
-    resp = (
-        supabase.table("agent_decisions")
-        .select(
-            "*, campaigns(id, name, campaign_id, platform, daily_budget, "
-            "ad_accounts(id, account_id, platform))"
+    try:
+        resp = (
+            supabase.table("agent_decisions")
+            .select(
+                "*, campaigns(id, name, campaign_id, platform, daily_budget, "
+                "ad_accounts(id, account_id, platform))"
+            )
+            .eq("executed", False)
+            .is_("approved_at", "null")
+            .order("created_at", desc=True)
+            .execute()
         )
-        .eq("executed", False)
-        .is_("approved_at", "null")
-        .order("created_at", desc=True)
-        .execute()
-    )
+    except Exception as exc:
+        log.error("decisions.list_query_failed", error=str(exc))
+        raise HTTPException(status_code=503, detail=f"Database query failed: {exc}") from exc
+
     return [_format_decision(row) for row in (resp.data or [])]
 
 
