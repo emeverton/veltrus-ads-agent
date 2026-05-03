@@ -43,3 +43,4 @@ token.json
 # Supabase local
 .branches/
 supabase/.temp/.env
+.claude/worktrees/
