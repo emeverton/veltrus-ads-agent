@@ -1,0 +1,116 @@
+version: "3.9"
+
+# =============================================================================
+# Veltrus Ads Agent — Serviços de produção
+# Serviços incluídos: redis, api, worker, beat, caddy
+# Serviços excluídos: dashboard (scaffold vazio), n8n (já rodando)
+# =============================================================================
+
+networks:
+  veltrus:
+    driver: bridge
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:
+
+services:
+  # ---------------------------------------------------------------------------
+  # Redis — broker + backend Celery
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - veltrus
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # API — FastAPI via uvicorn
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks:
+      - veltrus
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Worker — Celery worker (consome fila de tarefas)
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks:
+      - veltrus
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A celery_app worker --loglevel=info --concurrency=2 -Q celery
+
+  # ---------------------------------------------------------------------------
+  # Beat — Celery beat (agendador de tarefas periódicas)
+  # ---------------------------------------------------------------------------
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks:
+      - veltrus
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: celery -A celery_app beat --loglevel=info --scheduler celery.beat:PersistentScheduler
+
+  # ---------------------------------------------------------------------------
+  # Caddy — reverse proxy com TLS automático (Let's Encrypt)
+  # Nota: se n8n já usa Caddy na porta 443, consulte o README para merge
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    networks:
+      - veltrus
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
