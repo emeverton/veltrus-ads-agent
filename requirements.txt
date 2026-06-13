@@ -31,10 +31,8 @@ pydantic>=2.10.0
 pydantic-settings>=2.7.0
 python-dotenv>=1.0.0
 
-# Agendamento e tarefas assíncronas
+# Agendamento
 apscheduler>=3.10.0
-celery>=5.4.0
-redis>=5.2.0
 
 # Utilitários
 tenacity>=9.0.0

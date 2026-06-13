@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = True
 
-    # Redis / Celery
+    # Redis (opcional — reservado para uso futuro)
     redis_url: str = "redis://localhost:6379/0"
 
     # Brevo (email marketing)
