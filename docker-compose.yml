@@ -1,0 +1,70 @@
+version: "3.9"
+
+# =============================================================================
+# Veltrus Ads Agent — Serviços de produção
+# Serviços: api, agent (APScheduler), caddy
+# =============================================================================
+
+networks:
+  veltrus:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+services:
+  # ---------------------------------------------------------------------------
+  # API — FastAPI via uvicorn
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: veltrus:latest
+    restart: unless-stopped
+    networks:
+      - veltrus
+    env_file:
+      - .env
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --workers 2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Agent — ciclo LangGraph agendado via APScheduler (agent/main.py)
+  # ---------------------------------------------------------------------------
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: veltrus:latest
+    restart: unless-stopped
+    networks:
+      - veltrus
+    env_file:
+      - .env
+    command: python -m agent.main
+
+  # ---------------------------------------------------------------------------
+  # Caddy — reverse proxy com TLS automático (Let's Encrypt)
+  # Nota: se n8n já usa Caddy na porta 443, consulte o README para merge
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    networks:
+      - veltrus
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api

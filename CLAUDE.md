@@ -12,7 +12,7 @@ O agente monitora métricas, analisa performance e executa otimizações automat
 - **API**: FastAPI (REST + WebSocket)
 - **Banco**: Supabase (Postgres) — dados de campanhas + memória persistente do agente
 - **Frontend**: Next.js 14 App Router + Tailwind CSS + shadcn/ui
-- **Fila**: Celery + Redis (tarefas assíncronas e agendamento)
+- **Agendamento**: APScheduler (`python -m agent.main`)
 
 ## Arquitetura multi-agente (LangGraph)
 
