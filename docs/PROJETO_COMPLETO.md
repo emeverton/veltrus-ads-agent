@@ -50,10 +50,10 @@ Inclui também um agente de **email marketing** integrado ao **Brevo**.
 
 ### Versão exportada
 
-- **Commit:** `5721f4dfaf49a9d9dfab28f6f56d7f2b3f5d88da`
+- **Commit:** `459ae456bfd79dfd6c5ba756f5927e862a0b9231`
 - **Branch:** `cursor/export-bundle-plugin-b4be`
-- **Data:** 2026-06-12 23:51:46 -0300
-- **Mensagem:** Merge pull request #8 from emeverton/cursor/docker-agent-service-db42
+- **Data:** 2026-06-13 11:10:27 +0000
+- **Mensagem:** feat: add export bundle plugin with full project documentation
 
 ---
 
@@ -381,7 +381,7 @@ curl -X POST http://localhost:8000/run -H "X-API-Key: $API_SECRET_KEY"
 
 ## Inventário de Arquivos
 
-Total de arquivos no pacote: **80**
+Total de arquivos no pacote: **81**
 Arquivos Python com código: **17**
 Migrations SQL: **5**
 
@@ -456,11 +456,12 @@ dashboard/
   ├── tsconfig.json (0 bytes)
   ├── index.ts (0 bytes)
 docs/
+  ├── PROJETO_COMPLETO.md (21,989 bytes)
   ├── api.md (0 bytes)
   ├── architecture.md (0 bytes)
 scripts/
   ├── deploy.sh (1,559 bytes)
-  ├── export_bundle.py (26,631 bytes (672 linhas))
+  ├── export_bundle.py (26,624 bytes (671 linhas))
   ├── kill_switch.py (12,697 bytes (366 linhas))
   ├── remote_deploy.sh (2,272 bytes)
   ├── seed_test_data.py (7,135 bytes (217 linhas))
@@ -542,13 +543,14 @@ tests/
 | `dashboard/tsconfig.json` | 0 | `e3b0c44298fc1c14` |
 | `dashboard/types/index.ts` | 0 | `e3b0c44298fc1c14` |
 | `docker-compose.yml` | 1,983 | `649e3815d64ce00e` |
+| `docs/PROJETO_COMPLETO.md` | 21,989 | `28d1ea158618636a` |
 | `docs/api.md` | 0 | `e3b0c44298fc1c14` |
 | `docs/architecture.md` | 0 | `e3b0c44298fc1c14` |
 | `railway.json` | 398 | `e64a82ccdb8c41b1` |
 | `requirements.txt` | 746 | `b8b6d99f92af1174` |
 | `runtime.txt` | 12 | `0ecb97b647d70ee7` |
 | `scripts/deploy.sh` | 1,559 | `2b5ed97501bb7963` |
-| `scripts/export_bundle.py` | 26,631 | `6bdbbc425080f253` |
+| `scripts/export_bundle.py` | 26,624 | `dac6dc35be49dd26` |
 | `scripts/kill_switch.py` | 12,697 | `6c3dba7f3e24a0c5` |
 | `scripts/remote_deploy.sh` | 2,272 | `0c6519e039081f2e` |
 | `scripts/seed_test_data.py` | 7,135 | `8b74feb4c6563a49` |
