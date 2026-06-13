@@ -585,6 +585,8 @@ def create_bundle(output_path: Path, files: list[Path], docs: str) -> dict:
 
         for f in files:
             rel = f.relative_to(ROOT)
+            if str(rel) == "docs/PROJETO_COMPLETO.md":
+                continue  # já incluído acima com conteúdo gerado
             zf.write(f, rel)
             manifest.append({
                 "path": str(rel),
