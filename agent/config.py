@@ -50,9 +50,15 @@ class Settings(BaseSettings):
     agent_max_budget_change_pct: float = 20.0
     agent_autonomous_mode: bool = False
 
-    # Notificações humanas — n8n / WhatsApp
-    n8n_webhook_url: str = ""          # URL do webhook n8n (POST com payload de decisão)
-    notify_phone_number: str = ""      # Número WhatsApp no formato E.164 (ex: 5511999998888)
+    # Evolution API — WhatsApp (aprovação humana)
+    evolution_api_base_url: str = "https://api.ehos.com.br"
+    evolution_api_key: str = ""
+    evolution_instance_name: str = "veltrus-agent"  # fallback se fetchInstances falhar
+    notify_phone_number: str = ""      # Número WhatsApp E.164 sem + (ex: 5511999998888)
+    api_public_url: str = ""           # URL pública da API (ex: https://api.veltrus.com.br)
+
+    # Legado — n8n (descontinuado; mantido para rollback)
+    n8n_webhook_url: str = ""
 
 
 settings = Settings()  # type: ignore[call-arg]

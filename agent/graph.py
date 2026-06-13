@@ -2,16 +2,16 @@
 Grafo LangGraph — Veltrus Ads Agent
 
 Fluxo por conta de anúncios:
-  START → analista ─(anomalias)──→ estrategista → revisor → executor → memorizador → END
-                   └─(sem anomalias)──────────────────────────────────→ memorizador → END
+  START → analista ─(anomalias)──→ estrategista → revisor → validate_guardrails → executor → memorizador → END
+                   └─(sem anomalias)──────────────────────────────────────────────────→ memorizador → END
 """
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any
-
-import httpx
 
 import structlog
 from langchain_anthropic import ChatAnthropic
@@ -20,7 +20,15 @@ from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from agent.client_config import (
+    compute_total_daily_spend,
+    find_campaign_budget_brl,
+    guardrails_config_from_client,
+    load_client_config,
+)
 from agent.config import settings
+from agent.guardrails import GuardrailsEnforcer, decision_to_guardrail_action
+from agent.notifications.evolution import send_approval_request
 from agent.tools import google_ads, meta_ads, normalizer
 from agent.tools.supabase_client import supabase
 
@@ -42,10 +50,12 @@ class AgentState(TypedDict):
     # Input: contexto da conta sendo analisada
     account: dict   # linha de ad_accounts (id, platform, account_id, token, client_id)
     client: dict    # linha de clients (name, vertical, business_dna)
+    client_config: dict  # guardrails por cliente (daily_budget_brl, autonomous_mode, ...)
 
     # ANALISTA
     campaigns_analyzed: list[dict]
     anomalies: list[dict]
+    total_daily_spend: float
 
     # ESTRATEGISTA
     decision: dict          # {campaign_uuid, campaign_id, campaign_name, platform, action_type, params, reasoning}
@@ -54,6 +64,11 @@ class AgentState(TypedDict):
     # REVISOR
     risk_level: str         # "LOW" | "MEDIUM" | "HIGH"
     risk_reasoning: str
+
+    # GUARDRAILS (enforcement programático)
+    guardrail_blocked: bool
+    guardrail_rejection_reason: str
+    rejected_actions: list[dict]
 
     # EXECUTOR
     execution_result: dict
@@ -345,10 +360,7 @@ async def notify_human(
     reasoning: str,
     decision_id: str,
 ) -> dict:
-    """Notifica um humano via webhook (n8n → WhatsApp) para aprovar ou rejeitar a ação.
-
-    Se N8N_WEBHOOK_URL não estiver configurado, apenas loga o alerta.
-    """
+    """Notifica um humano via Evolution API (WhatsApp) para aprovar ou rejeitar a ação."""
     log.warning(
         "executor.human_approval_required",
         campaign_name=campaign_name,
@@ -357,35 +369,13 @@ async def notify_human(
         decision_id=decision_id,
     )
 
-    webhook_url = settings.n8n_webhook_url
-    if not webhook_url:
-        return {
-            "notification_sent": False,
-            "channel": "log_only",
-            "message": (
-                f"[{risk_level}] Campanha '{campaign_name}': "
-                f"ação '{action_type}' aguarda aprovação. ID: {decision_id}"
-            ),
-        }
-
-    payload = {
-        "decision_id":   decision_id,
-        "campaign_name": campaign_name,
-        "action_type":   action_type,
-        "risk_level":    risk_level,
-        "reasoning":     reasoning,
-        "phone_number":  settings.notify_phone_number,
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(webhook_url, json=payload)
-            resp.raise_for_status()
-        log.info("executor.webhook_sent", decision_id=decision_id, status=resp.status_code)
-        return {"notification_sent": True, "channel": "n8n_webhook", "http_status": resp.status_code}
-    except Exception as exc:
-        log.error("executor.webhook_failed", decision_id=decision_id, error=str(exc))
-        return {"notification_sent": False, "channel": "n8n_webhook", "error": str(exc)}
+    return await send_approval_request(
+        campaign_name=campaign_name,
+        action_type=action_type,
+        risk_level=risk_level,
+        reasoning=reasoning,
+        decision_id=decision_id,
+    )
 
 # ===========================================================================
 # FERRAMENTAS — MEMORIZADOR
@@ -521,7 +511,12 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
         campaigns_analyzed=len(campaigns_analyzed),
         anomalies=len(anomalies),
     )
-    return {"campaigns_analyzed": campaigns_analyzed, "anomalies": anomalies}
+    total_daily_spend = float(compute_total_daily_spend(campaigns_analyzed))
+    return {
+        "campaigns_analyzed": campaigns_analyzed,
+        "anomalies": anomalies,
+        "total_daily_spend": total_daily_spend,
+    }
 
 # ===========================================================================
 # NÓ 2: ESTRATEGISTA
@@ -657,6 +652,67 @@ Classifique o risco e retorne o JSON.
     return {"risk_level": risk_level, "risk_reasoning": risk_reasoning}
 
 # ===========================================================================
+# NÓ 3b: VALIDATE_GUARDRAILS — enforcement programático (sem LLM)
+# ===========================================================================
+async def validate_guardrails_node(state: AgentState) -> dict:
+    """Valida a decisão contra guardrails hard-coded antes de qualquer execução."""
+    decision = state.get("decision") or {}
+    action_type = decision.get("action_type", "monitor_only")
+
+    if action_type == "monitor_only" or not action_type:
+        return {
+            "guardrail_blocked": False,
+            "guardrail_rejection_reason": "",
+            "rejected_actions": [],
+        }
+
+    client_config = state.get("client_config") or load_client_config(state.get("client") or {})
+    enforcer = GuardrailsEnforcer(guardrails_config_from_client(client_config))
+
+    usd_brl_rate = Decimal(os.getenv("AGENT_USD_BRL_RATE", "5.0"))
+    current_budget_brl = find_campaign_budget_brl(
+        decision,
+        state.get("campaigns_analyzed") or [],
+        usd_brl_rate=usd_brl_rate,
+    )
+    guard_action = decision_to_guardrail_action(
+        decision,
+        current_budget_brl=current_budget_brl,
+        usd_brl_rate=usd_brl_rate,
+    )
+
+    if guard_action is None:
+        return {
+            "guardrail_blocked": False,
+            "guardrail_rejection_reason": "",
+            "rejected_actions": [],
+        }
+
+    validated = enforcer.validate_action_batch(
+        [guard_action],
+        {
+            "total_daily_spend": state.get("total_daily_spend", 0),
+            "campaigns_paused_this_cycle": 0,
+        },
+    )
+    action_result = validated[0]
+    if action_result.get("approved"):
+        log.info("guardrails.approved", action_type=action_type)
+        return {
+            "guardrail_blocked": False,
+            "guardrail_rejection_reason": "",
+            "rejected_actions": [],
+        }
+
+    reason = action_result.get("rejected_reason", "Rejeitado pelo guardrail")
+    log.warning("guardrails.rejected", action_type=action_type, reason=reason)
+    return {
+        "guardrail_blocked": True,
+        "guardrail_rejection_reason": reason,
+        "rejected_actions": validated,
+    }
+
+# ===========================================================================
 # NÓ 4: EXECUTOR
 # ===========================================================================
 _EXECUTOR_SYSTEM = """
@@ -665,8 +721,8 @@ Você é o EXECUTOR do Veltrus Ads Agent.
 Função: executar ou enfileirar a decisão com base no risco classificado.
 
 Regras de execução:
-- risk_level == LOW  E autonomous_mode == true  → execute a ação via API (run_meta_action ou run_google_action)
-                                                   depois salve com save_decision(executed=true, approved_by="autonomous")
+- Se guardrail_blocked == true → NÃO execute via API. Apenas save_decision(executed=false) com motivo em payload.guardrail_rejection
+- risk_level == LOW  E autonomous_mode == true  E guardrail_blocked == false → execute via API + save_decision(executed=true, approved_by="autonomous")
 - risk_level == LOW  E autonomous_mode == false → save_decision(executed=false) + notify_human
 - risk_level == MEDIUM ou HIGH                  → save_decision(executed=false) + notify_human
 
@@ -679,7 +735,7 @@ Ferramentas disponíveis:
 - save_decision     → registra em agent_decisions
 - run_meta_action   → executa ação Meta Ads (busca o token internamente via account_external_id)
 - run_google_action → executa ação Google Ads (busca credenciais internamente)
-- notify_human      → envia notificação de aprovação (placeholder)
+- notify_human      → envia notificação WhatsApp via Evolution API
 
 Retorne EXCLUSIVAMENTE um JSON:
 {
@@ -695,12 +751,16 @@ async def executor_node(state: AgentState) -> dict:
     decision = state["decision"]
     risk_level = state["risk_level"]
     account = state["account"]
+    client_config = state.get("client_config") or {}
+    autonomous_mode = client_config.get("autonomous_mode", settings.agent_autonomous_mode)
+    guardrail_blocked = state.get("guardrail_blocked", False)
 
     log.info(
         "executor.start",
         action_type=decision.get("action_type"),
         risk_level=risk_level,
-        autonomous=settings.agent_autonomous_mode,
+        autonomous=autonomous_mode,
+        guardrail_blocked=guardrail_blocked,
     )
 
     user_prompt = f"""
@@ -710,10 +770,13 @@ Decisão a processar:
 Risco classificado: {risk_level}
 Risk reasoning: {state.get("risk_reasoning", "")}
 
+Guardrail bloqueado: {guardrail_blocked}
+Motivo guardrail: {state.get("guardrail_rejection_reason", "")}
+
 Contexto da conta:
 - Plataforma: {account["platform"]}
 - ID externo da conta: {account["account_id"]}
-- autonomous_mode: {settings.agent_autonomous_mode}
+- autonomous_mode: {autonomous_mode}
 
 Siga as regras de execução e retorne o JSON de resultado.
 """.strip()
@@ -813,6 +876,7 @@ def build_graph() -> StateGraph:
     graph.add_node("analista", analista_node)
     graph.add_node("estrategista", estrategista_node)
     graph.add_node("revisor", revisor_node)
+    graph.add_node("validate_guardrails", validate_guardrails_node)
     graph.add_node("executor", executor_node)
     graph.add_node("memorizador", memorizador_node)
 
@@ -823,7 +887,8 @@ def build_graph() -> StateGraph:
         {"estrategista": "estrategista", "memorizador": "memorizador"},
     )
     graph.add_edge("estrategista", "revisor")
-    graph.add_edge("revisor", "executor")
+    graph.add_edge("revisor", "validate_guardrails")
+    graph.add_edge("validate_guardrails", "executor")
     graph.add_edge("executor", "memorizador")
     graph.add_edge("memorizador", END)
 
