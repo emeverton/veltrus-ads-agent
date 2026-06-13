@@ -13,6 +13,7 @@ from datetime import datetime
 
 import structlog
 
+from agent.client_config import load_client_config
 from agent.graph import AgentState, compiled_graph
 from agent.tools.supabase_client import supabase
 
@@ -29,12 +30,17 @@ async def run_account(account: dict, client: dict) -> None:
     initial_state: AgentState = {
         "account": account,
         "client": client,
+        "client_config": load_client_config(client),
         "campaigns_analyzed": [],
         "anomalies": [],
+        "total_daily_spend": 0.0,
         "decision": {},
         "memory_context": [],
         "risk_level": "",
         "risk_reasoning": "",
+        "guardrail_blocked": False,
+        "guardrail_rejection_reason": "",
+        "rejected_actions": [],
         "execution_result": {},
     }
 

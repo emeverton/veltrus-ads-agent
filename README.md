@@ -160,49 +160,46 @@ false                    | preenchido  | ❌ Rejeitada (approved_by = "rejected:
 
 ---
 
-## Aprovação via WhatsApp — Integração n8n
+## Aprovação via WhatsApp — Evolution API
 
-O agente dispara `notify_human()` toda vez que uma decisão precisa de aprovação humana. Quando `N8N_WEBHOOK_URL` está configurado, o agente faz `POST` ao n8n com o seguinte payload:
+O agente dispara `notify_human()` quando uma decisão precisa de aprovação humana. A mensagem é enviada **diretamente** via Evolution API (`agent/notifications/evolution.py`):
 
-```json
-{
-  "decision_id":   "uuid-da-decisao",
-  "campaign_name": "Campanha Black Friday",
-  "action_type":   "budget_increase",
-  "risk_level":    "MEDIUM",
-  "reasoning":     "ROAS 3.8x acima da meta, CPA abaixo do limite. Recomendo +20% no budget.",
-  "phone_number":  "5511999998888"
-}
+```
+POST https://api.ehos.com.br/message/sendText/{instance}
+Header: apikey: {EVOLUTION_API_KEY}
+Body: { "number": "5511999998888", "text": "..." }
 ```
 
-### Fluxo completo
+Instância ativa verificada em `GET /instance/fetchInstances` (padrão: `veltrus-agent`).
+
+### Fluxo
 
 ```
 Agente LangGraph
   └─ notify_human()
-       └─ POST → N8N_WEBHOOK_URL
-                    │
-              ┌─────▼─────────────────────────────┐
-              │  n8n Workflow                      │
-              │                                    │
-              │  1. Webhook (trigger)              │
-              │  2. Format WhatsApp message        │
-              │  3. HTTP → WhatsApp Business API   │
-              │     (mensagem interativa c/ botões)│
-              └────────────────────────────────────┘
-                    │  Usuário toca botão
-              ┌─────▼─────────────────────────────┐
-              │  4. Webhook (resposta WhatsApp)    │
-              │  5. Switch: Aprovar / Rejeitar     │
-              │  6a. PATCH /decisions/{id}/approve │
-              │  6b. PATCH /decisions/{id}/reject  │
-              │  7. WhatsApp: confirma ação        │
-              └────────────────────────────────────┘
-                    │
-              Supabase atualizado + API executada
+       └─ Evolution API → WhatsApp (texto com ID da decisão)
+              │
+              │  Operador aprova via API
+              ▼
+       PATCH /decisions/{id}/approve|reject
+              │
+              ▼
+       Supabase atualizado + Meta/Google API executada
 ```
 
-### Configuração do Workflow n8n
+### Variáveis de ambiente
+
+```bash
+EVOLUTION_API_BASE_URL=https://api.ehos.com.br
+EVOLUTION_API_KEY=sua-global-api-key
+EVOLUTION_INSTANCE_NAME=veltrus-agent
+NOTIFY_PHONE_NUMBER=5511999998888
+API_PUBLIC_URL=https://api.seuservidor.com
+```
+
+> **Nota:** `N8N_WEBHOOK_URL` foi descontinuado. Mantido no `.env` apenas para rollback.
+
+### Configuração legada n8n (descontinuada)
 
 #### Node 1 — Webhook (recebe do agente)
 
