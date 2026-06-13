@@ -4,7 +4,7 @@ Ponto de entrada do agente — executa o grafo para todas as contas de anúncios
 Uso direto:
     python -m agent.run
 
-Via APScheduler / Celery: importar e agendar run_all_accounts().
+Via APScheduler: importado e agendado por agent.main.
 """
 from __future__ import annotations
 
