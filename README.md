@@ -341,3 +341,33 @@ Estruturados via `structlog`. Entradas críticas (regra disparada) aparecem como
 
 - [Arquitetura detalhada](docs/architecture.md)
 - [Referência da API](docs/api.md)
+- [Documentação completa do projeto](docs/PROJETO_COMPLETO.md) — gerada automaticamente
+
+---
+
+## Exportar Pacote Completo
+
+O plugin `scripts/export_bundle.py` gera um ZIP com todo o código-fonte, migrations, documentação detalhada e manifesto de arquivos.
+
+```bash
+# Gerar pacote ZIP completo (salva em dist/)
+python scripts/export_bundle.py
+
+# Especificar caminho de saída
+python scripts/export_bundle.py --output ./veltrus-completo.zip
+
+# Apenas gerar documentação (sem ZIP)
+python scripts/export_bundle.py --docs-only
+```
+
+**Conteúdo do pacote exportado:**
+
+| Item | Descrição |
+|------|-----------|
+| Código-fonte | agent/, api/, dashboard/, scripts/ |
+| Migrations | supabase/migrations/ (4 arquivos SQL) |
+| Docker | Dockerfile, docker-compose.yml, Caddyfile |
+| `docs/PROJETO_COMPLETO.md` | Documentação detalhada de tudo implementado |
+| `MANIFEST.json` | Inventário com checksums SHA256 |
+
+Arquivos excluídos automaticamente: `.env`, `.git`, `node_modules`, `venv`, `__pycache__`.
