@@ -37,9 +37,6 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = True
 
-    # Redis / Celery
-    redis_url: str = "redis://localhost:6379/0"
-
     # Brevo (email marketing)
     brevo_api_key: str = ""
     brevo_api_base_url: str = "https://api.brevo.com/v3"

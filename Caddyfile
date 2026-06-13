@@ -1,0 +1,31 @@
+# =============================================================================
+# Veltrus API — Reverse proxy com TLS automático
+# Domínio: veltrus-api.ehos.com.br → api:8000
+# =============================================================================
+# ATENÇÃO: se o n8n já usa Caddy com porta 80/443 no mesmo VPS,
+# adicione o bloco abaixo ao Caddyfile existente do n8n e
+# remova o serviço "caddy" do docker-compose.yml deste projeto.
+# =============================================================================
+
+veltrus-api.ehos.com.br {
+    reverse_proxy api:8000 {
+        health_uri /health
+        health_interval 30s
+        health_timeout 10s
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+    }
+
+    log {
+        output file /data/logs/veltrus-api-access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+    }
+}
