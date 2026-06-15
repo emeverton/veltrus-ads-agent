@@ -12,7 +12,7 @@ __all__ = ["mcp"]
 
 def __getattr__(name: str):  # pragma: no cover - thin lazy accessor
     if name == "mcp":
-        from plugins.veltrus_mcp.server import mcp
+        from .server import mcp
 
         return mcp
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
