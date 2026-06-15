@@ -8,6 +8,7 @@ Fluxo por conta de anúncios:
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -112,6 +113,15 @@ def _extract_json(text: str) -> dict:
         return json.loads(text[start:end])
     except json.JSONDecodeError:
         return {}
+
+
+def is_valid_uuid(value: Any) -> bool:
+    """Valida UUID antes de enviar valores para colunas uuid no Supabase."""
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 # ===========================================================================
 # FERRAMENTAS — ANALISTA
@@ -240,6 +250,10 @@ async def save_decision(
     approved_by: str | None = None,
 ) -> dict:
     """Registra uma decisão do agente em agent_decisions e retorna a linha criada."""
+    if not is_valid_uuid(campaign_uuid):
+        log.warning("estrategista.skip", reason="invalid_uuid", value=campaign_uuid)
+        return {}
+
     row: dict[str, Any] = {
         "campaign_id": campaign_uuid,
         "action_type": action_type,
