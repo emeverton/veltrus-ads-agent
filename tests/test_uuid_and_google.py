@@ -14,8 +14,10 @@ import agent.graph as graph
 import agent.run as run_module
 import agent.graphs.google_agent as google_agent
 from agent.graph import (
+    _is_invalid_uuid,
     _recover_campaign_uuid,
     fetch_account_campaigns,
+    fetch_daily_metrics,
     is_valid_uuid,
     run_google_action,
     save_decision,
@@ -38,10 +40,55 @@ VALID_UUID = "922f2273-6e2f-4649-9961-e510cbc4a9a2"
         (None, False),
         (123, False),
         ("not-a-uuid", False),
+        ("120249189080650247", False),  # Meta campaign_id numérico — não é UUID interno
     ],
 )
 def test_is_valid_uuid(value, expected):
     assert is_valid_uuid(value) is expected
+
+
+@pytest.mark.parametrize(
+    "value,expected_invalid",
+    [
+        ("120249189080650247", True),
+        (VALID_UUID, False),
+        ("n/a", True),
+        ("None", True),
+    ],
+)
+def test_is_invalid_uuid(value, expected_invalid):
+    assert _is_invalid_uuid(value) is expected_invalid
+
+
+@pytest.mark.asyncio
+async def test_fetch_daily_metrics_skips_invalid_campaign_uuid(mocker):
+    """fetch_daily_metrics não deve consultar Supabase com ID numérico do Meta."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    log_spy = mocker.spy(graph.log, "warning")
+
+    result = await fetch_daily_metrics.ainvoke(
+        {"campaign_uuid": "120249189080650247", "platform": "meta", "days": 7}
+    )
+
+    assert result == []
+    fake_supabase.table.assert_not_called()
+    events = [c.args[0] for c in log_spy.call_args_list if c.args]
+    assert "fetch_daily_metrics.skip" in events
+
+
+@pytest.mark.asyncio
+async def test_fetch_daily_metrics_queries_with_valid_uuid(mocker):
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    (
+        fake_supabase.table.return_value.select.return_value.eq.return_value.gte.return_value.order.return_value.execute.return_value
+    ).data = [{"date": "2026-06-01", "spend": 10}]
+
+    out = await fetch_daily_metrics.ainvoke(
+        {"campaign_uuid": VALID_UUID, "platform": "meta", "days": 7}
+    )
+
+    fake_supabase.table.assert_called_once_with("daily_metrics")
+    assert len(out) == 1
 
 
 @pytest.mark.asyncio

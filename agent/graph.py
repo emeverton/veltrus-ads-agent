@@ -106,19 +106,22 @@ async def _agent_loop(
 def is_valid_uuid(value: Any) -> bool:
     """Retorna True somente se *value* for um UUID válido.
 
-    Protege INSERTs/UPDATEs que usam colunas uuid (ex.: agent_decisions.campaign_id),
-    onde o LLM ocasionalmente devolve placeholders como "n/a", "N/A" ou "".
+    Protege queries/INSERTs em colunas uuid (ex.: daily_metrics.campaign_id),
+    onde o LLM ocasionalmente devolve IDs externos numéricos do Meta/Google,
+    placeholders como "n/a"/"None" ou strings vazias.
     """
-    if not isinstance(value, str):
-        return False
-    candidate = value.strip()
-    if not candidate or candidate.lower() in {"n/a", "na", "none", "null", ""}:
+    if not value:
         return False
     try:
-        uuid.UUID(candidate)
+        uuid.UUID(str(value).strip())
         return True
     except (ValueError, AttributeError, TypeError):
         return False
+
+
+def _is_invalid_uuid(value: Any) -> bool:
+    """Inverso de is_valid_uuid — usado em guards antes de chamadas ao Supabase."""
+    return not is_valid_uuid(value)
 
 
 def _extract_json(text: str) -> dict:
@@ -138,14 +141,7 @@ def _extract_json(text: str) -> dict:
 @tool
 async def fetch_account_campaigns(ad_account_uuid: str | None) -> list[dict]:
     """Busca campanhas não-arquivadas de uma conta de anúncios pelo UUID interno."""
-    if not ad_account_uuid or ad_account_uuid in ("None", "n/a", ""):
-        log.warning(
-            "fetch_campaigns.skip",
-            reason="invalid_uuid",
-            value=ad_account_uuid,
-        )
-        return []
-    if not is_valid_uuid(ad_account_uuid):
+    if _is_invalid_uuid(ad_account_uuid):
         log.warning(
             "fetch_campaigns.skip",
             reason="invalid_uuid",
@@ -171,6 +167,14 @@ async def fetch_daily_metrics(campaign_uuid: str, platform: str = "meta", days: 
     ctr, attribution_window, confidence_score, data_source.
     platform: "meta" | "google" — necessário para normalização correta de seed data.
     """
+    if _is_invalid_uuid(campaign_uuid):
+        log.warning(
+            "fetch_daily_metrics.skip",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+        )
+        return []
+
     since = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
     result = (
         supabase.table("daily_metrics")
@@ -298,7 +302,14 @@ async def search_agent_memory(
         .limit(limit)
     )
     if campaign_uuid:
-        qb = qb.eq("campaign_id", campaign_uuid)
+        if _is_invalid_uuid(campaign_uuid):
+            log.warning(
+                "search_agent_memory.skip_campaign_filter",
+                reason="invalid_uuid",
+                value=campaign_uuid,
+            )
+        else:
+            qb = qb.eq("campaign_id", campaign_uuid)
     result = qb.execute()
     return result.data or []
 
@@ -315,7 +326,7 @@ async def save_decision(
     approved_by: str | None = None,
 ) -> dict:
     """Registra uma decisão do agente em agent_decisions e retorna a linha criada."""
-    if not is_valid_uuid(campaign_uuid):
+    if _is_invalid_uuid(campaign_uuid):
         log.warning(
             "estrategista.skip",
             reason="invalid_uuid",
