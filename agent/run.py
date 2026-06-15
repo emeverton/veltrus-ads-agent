@@ -14,6 +14,7 @@ from datetime import datetime
 import structlog
 
 from agent.graph import AgentState, compiled_graph
+from agent.graphs.google_agent import run_google_agent
 from agent.tools.supabase_client import supabase
 
 log = structlog.get_logger(__name__)
@@ -55,6 +56,8 @@ async def run_all_accounts() -> None:
     """
     started_at = datetime.utcnow()
     log.info("run.cycle.start", started_at=started_at.isoformat())
+
+    await run_google_agent()
 
     result = (
         supabase.table("ad_accounts")

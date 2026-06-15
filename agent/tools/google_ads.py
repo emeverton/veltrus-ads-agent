@@ -61,7 +61,7 @@ async def get_campaigns(
     credentials: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Lista campanhas não-removidas com nome, status e budget diário."""
-    log.info("google.get_campaigns.start", customer_id=customer_id)
+    log.info("google.list_campaigns.start", customer_id=customer_id)
     client = _build_client(credentials)
     ga_service = client.get_service("GoogleAdsService")
 
@@ -90,7 +90,7 @@ async def get_campaigns(
         for row in rows
     ]
 
-    log.info("google.get_campaigns.done", customer_id=customer_id, total=len(campaigns))
+    log.info("google.list_campaigns.done", customer_id=customer_id, total=len(campaigns))
     return campaigns
 
 
