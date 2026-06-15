@@ -28,6 +28,9 @@ def _build_client(credentials: dict[str, Any]) -> GoogleAdsClient:
         "use_proto_plus": True,
         "developer_token": settings.google_ads_developer_token,
         **credentials,  # client_id, client_secret, refresh_token, login_customer_id (opcional)
+        "login_customer_id": credentials.get("login_customer_id")
+        or settings.google_ads_login_customer_id
+        or None,
     }
     return GoogleAdsClient.load_from_dict(config)
 

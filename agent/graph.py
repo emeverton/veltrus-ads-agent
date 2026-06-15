@@ -103,25 +103,25 @@ async def _agent_loop(
     return ""
 
 
-def is_valid_uuid(value: Any) -> bool:
-    """Retorna True somente se *value* for um UUID válido.
-
-    Protege queries/INSERTs em colunas uuid (ex.: daily_metrics.campaign_id),
-    onde o LLM ocasionalmente devolve IDs externos numéricos do Meta/Google,
-    placeholders como "n/a"/"None" ou strings vazias.
-    """
-    if not value:
-        return False
-    try:
-        uuid.UUID(str(value).strip())
-        return True
-    except (ValueError, AttributeError, TypeError):
-        return False
-
-
 def _is_invalid_uuid(value: Any) -> bool:
-    """Inverso de is_valid_uuid — usado em guards antes de chamadas ao Supabase."""
-    return not is_valid_uuid(value)
+    """Retorna True para qualquer valor que não seja UUID v4 válido."""
+    if not value:
+        return True
+    try:
+        parsed = uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return True
+    return parsed.version != 4
+
+
+def is_invalid_uuid(value: Any) -> bool:
+    """Alias público usado por testes e integrações."""
+    return _is_invalid_uuid(value)
+
+
+def is_valid_uuid(value: Any) -> bool:
+    """Compatibilidade: inverso de _is_invalid_uuid."""
+    return not _is_invalid_uuid(value)
 
 
 def _extract_json(text: str) -> dict:
@@ -198,7 +198,7 @@ async def fetch_meta_campaigns_live(ad_account_uuid: str) -> list[dict]:
     Retorna campanhas ativas e pausadas. Preferir sobre fetch_account_campaigns
     quando platform == 'meta'. Retorna lista vazia se a conta não tiver campanhas.
     """
-    if not is_valid_uuid(ad_account_uuid):
+    if _is_invalid_uuid(ad_account_uuid):
         log.warning(
             "fetch_meta_campaigns.skip",
             reason="invalid_uuid",
@@ -229,7 +229,7 @@ async def fetch_meta_insights_live(
     Retorna spend, impressions, clicks, conversions, cpa, roas, ctr.
     Preferir sobre fetch_daily_metrics quando platform == 'meta'.
     """
-    if not is_valid_uuid(ad_account_uuid):
+    if _is_invalid_uuid(ad_account_uuid):
         log.warning(
             "fetch_meta_insights.skip",
             reason="invalid_uuid",
@@ -301,15 +301,14 @@ async def search_agent_memory(
         .order("created_at", desc=True)
         .limit(limit)
     )
-    if campaign_uuid:
-        if _is_invalid_uuid(campaign_uuid):
-            log.warning(
-                "search_agent_memory.skip_campaign_filter",
-                reason="invalid_uuid",
-                value=campaign_uuid,
-            )
-        else:
-            qb = qb.eq("campaign_id", campaign_uuid)
+    if campaign_uuid and _is_invalid_uuid(campaign_uuid):
+        log.warning(
+            "search_agent_memory.skip_campaign_filter",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+        )
+    elif campaign_uuid:
+        qb = qb.eq("campaign_id", campaign_uuid)
     result = qb.execute()
     return result.data or []
 
@@ -525,7 +524,7 @@ async def save_memory(
     campaign_uuid: None = memória global; UUID = específica da campanha.
     embedding é null por enquanto — será preenchido quando o serviço de embeddings for integrado.
     """
-    safe_campaign_uuid = campaign_uuid if is_valid_uuid(campaign_uuid) else None
+    safe_campaign_uuid = campaign_uuid if not _is_invalid_uuid(campaign_uuid) else None
     if campaign_uuid and safe_campaign_uuid is None:
         log.warning("memorizador.invalid_campaign_uuid", value=campaign_uuid)
 
@@ -623,7 +622,7 @@ def _account_internal_uuid(account: dict) -> str | None:
     if raw is None:
         return None
     candidate = str(raw).strip()
-    return candidate if is_valid_uuid(candidate) else None
+    return candidate if not _is_invalid_uuid(candidate) else None
 
 
 async def analista_node(state: AgentState) -> dict:
@@ -745,7 +744,7 @@ Retorne o JSON conforme especificado.
     if not parsed.get("action_type"):
         parsed = {"action_type": "monitor_only", "reasoning": raw, "campaign_uuid": "", "params": {}}
 
-    if not is_valid_uuid(parsed.get("campaign_uuid")):
+    if _is_invalid_uuid(parsed.get("campaign_uuid")):
         recovered = _recover_campaign_uuid(parsed, anomalies)
         if recovered:
             log.info(
@@ -774,14 +773,14 @@ def _recover_campaign_uuid(decision: dict, anomalies: list[dict]) -> str | None:
 
     for anomaly in anomalies:
         candidate = anomaly.get("campaign_uuid")
-        if not is_valid_uuid(candidate):
+        if _is_invalid_uuid(candidate):
             continue
         if ext_id and str(anomaly.get("campaign_id") or "").strip() == ext_id:
             return candidate
         if name and str(anomaly.get("name") or "").strip() == name:
             return candidate
 
-    valid = [a.get("campaign_uuid") for a in anomalies if is_valid_uuid(a.get("campaign_uuid"))]
+    valid = [a.get("campaign_uuid") for a in anomalies if not _is_invalid_uuid(a.get("campaign_uuid"))]
     if len(valid) == 1:
         return valid[0]
     return None

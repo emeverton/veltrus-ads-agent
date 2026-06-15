@@ -13,17 +13,22 @@ import pytest
 import agent.graph as graph
 import agent.run as run_module
 import agent.graphs.google_agent as google_agent
+import agent.tools.google_ads as google_ads_tools
 from agent.graph import (
     _is_invalid_uuid,
     _recover_campaign_uuid,
-    fetch_account_campaigns,
     fetch_daily_metrics,
+    fetch_account_campaigns,
+    is_invalid_uuid,
     is_valid_uuid,
     run_google_action,
     save_decision,
+    save_memory,
 )
 
 VALID_UUID = "922f2273-6e2f-4649-9961-e510cbc4a9a2"
+VALID_UUID_2 = "f888f617-1692-4d9d-852f-a9d46a02b917"
+META_NUMERIC_CAMPAIGN_ID = "120249189080650247"
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +44,7 @@ VALID_UUID = "922f2273-6e2f-4649-9961-e510cbc4a9a2"
         ("   ", False),
         (None, False),
         (123, False),
+        (META_NUMERIC_CAMPAIGN_ID, False),
         ("not-a-uuid", False),
         ("120249189080650247", False),  # Meta campaign_id numérico — não é UUID interno
     ],
@@ -50,14 +56,16 @@ def test_is_valid_uuid(value, expected):
 @pytest.mark.parametrize(
     "value,expected_invalid",
     [
-        ("120249189080650247", True),
+        (META_NUMERIC_CAMPAIGN_ID, True),
         (VALID_UUID, False),
+        (VALID_UUID_2, False),
         ("n/a", True),
         ("None", True),
     ],
 )
 def test_is_invalid_uuid(value, expected_invalid):
     assert _is_invalid_uuid(value) is expected_invalid
+    assert is_invalid_uuid(value) is expected_invalid
 
 
 @pytest.mark.asyncio
@@ -134,7 +142,7 @@ async def test_save_decision_inserts_with_valid_uuid(mocker):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", ["None", "n/a", ""])
+@pytest.mark.parametrize("value", ["None", "n/a", "", META_NUMERIC_CAMPAIGN_ID])
 async def test_fetch_account_campaigns_skips_invalid_ad_account_uuid(mocker, value):
     """fetch_account_campaigns não deve consultar UUID inválido no Supabase."""
     fake_supabase = mocker.patch.object(graph, "supabase")
@@ -146,6 +154,22 @@ async def test_fetch_account_campaigns_skips_invalid_ad_account_uuid(mocker, val
     fake_supabase.table.assert_not_called()
     events = [c.args[0] for c in log_spy.call_args_list if c.args]
     assert "fetch_campaigns.skip" in events
+
+
+@pytest.mark.asyncio
+async def test_fetch_daily_metrics_skips_numeric_meta_campaign_id(mocker):
+    """fetch_daily_metrics não deve enviar ID numérico Meta para coluna uuid."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    log_spy = mocker.spy(graph.log, "warning")
+
+    result = await fetch_daily_metrics.ainvoke(
+        {"campaign_uuid": META_NUMERIC_CAMPAIGN_ID, "platform": "meta"}
+    )
+
+    assert result == []
+    fake_supabase.table.assert_not_called()
+    events = [c.args[0] for c in log_spy.call_args_list if c.args]
+    assert "fetch_daily_metrics.skip" in events
 
 
 def test_recover_campaign_uuid_by_external_id():
@@ -167,9 +191,30 @@ def test_recover_campaign_uuid_none_when_ambiguous():
     decision = {"campaign_id": "nope", "campaign_name": "nope"}
     anomalies = [
         {"campaign_uuid": VALID_UUID, "campaign_id": "A"},
-        {"campaign_uuid": "11111111-1111-1111-1111-111111111111", "campaign_id": "B"},
+        {"campaign_uuid": VALID_UUID_2, "campaign_id": "B"},
     ]
     assert _recover_campaign_uuid(decision, anomalies) is None
+
+
+@pytest.mark.asyncio
+async def test_save_memory_nulls_numeric_campaign_uuid(mocker):
+    """save_memory grava memória global quando campaign_uuid veio como ID externo Meta."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    (
+        fake_supabase.table.return_value.insert.return_value.execute.return_value
+    ).data = [{"id": "mem-1", "campaign_id": None}]
+
+    result = await save_memory.ainvoke(
+        {
+            "content": "campanha com ID externo Meta",
+            "memory_type": "observation",
+            "campaign_uuid": META_NUMERIC_CAMPAIGN_ID,
+        }
+    )
+
+    inserted = fake_supabase.table.return_value.insert.call_args.args[0]
+    assert inserted["campaign_id"] is None
+    assert result["id"] == "mem-1"
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +294,7 @@ async def test_fetch_account_campaigns_skips_invalid_uuid(mocker):
     fake_supabase = mocker.patch.object(graph, "supabase")
     log_spy = mocker.spy(graph.log, "warning")
 
-    for bad in ("None", "n/a", "", None):
+    for bad in ("None", "n/a", "", None, META_NUMERIC_CAMPAIGN_ID):
         fake_supabase.reset_mock()
         out = await graph.fetch_account_campaigns.ainvoke({"ad_account_uuid": bad})
         assert out == []
@@ -335,3 +380,24 @@ async def test_run_all_accounts_logs_google_agent_start_and_done(mocker):
     events = [c.args[0] for c in log_spy.call_args_list if c.args]
     assert "google.agent.start" in events
     assert "google.agent.done" in events
+
+
+def test_google_ads_client_uses_settings_login_customer_id(mocker):
+    mocker.patch.object(google_ads_tools.settings, "google_ads_developer_token", "dev-token")
+    mocker.patch.object(google_ads_tools.settings, "google_ads_login_customer_id", "1234567890")
+    load = mocker.patch.object(
+        google_ads_tools.GoogleAdsClient,
+        "load_from_dict",
+        return_value=object(),
+    )
+
+    google_ads_tools._build_client(
+        {
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "refresh_token": "refresh-token",
+        }
+    )
+
+    config = load.call_args.args[0]
+    assert config["login_customer_id"] == "1234567890"
