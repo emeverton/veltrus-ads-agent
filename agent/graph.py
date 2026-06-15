@@ -116,9 +116,26 @@ def _extract_json(text: str) -> dict:
 # ===========================================================================
 # FERRAMENTAS — ANALISTA
 # ===========================================================================
+_INVALID_UUIDS = frozenset({"None", "n/a", "null", "undefined", ""})
+
+
+def _is_invalid_uuid(value: str | None) -> bool:
+    """Retorna True se o valor não é um UUID válido para envio ao Supabase."""
+    if not value:
+        return True
+    return str(value) in _INVALID_UUIDS
+
+
 @tool
 async def fetch_account_campaigns(ad_account_uuid: str) -> list[dict]:
     """Busca campanhas não-arquivadas de uma conta de anúncios pelo UUID interno."""
+    if _is_invalid_uuid(ad_account_uuid):
+        log.warning(
+            "fetch_campaigns.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return []
     result = (
         supabase.table("campaigns")
         .select("id, campaign_id, name, platform, status, daily_budget")
@@ -138,6 +155,13 @@ async def fetch_daily_metrics(campaign_uuid: str, platform: str = "meta", days: 
     ctr, attribution_window, confidence_score, data_source.
     platform: "meta" | "google" — necessário para normalização correta de seed data.
     """
+    if _is_invalid_uuid(campaign_uuid):
+        log.warning(
+            "fetch_daily_metrics.skip",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+        )
+        return []
     since = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
     result = (
         supabase.table("daily_metrics")
@@ -161,6 +185,13 @@ async def fetch_meta_campaigns_live(ad_account_uuid: str) -> list[dict]:
     Retorna campanhas ativas e pausadas. Preferir sobre fetch_account_campaigns
     quando platform == 'meta'. Retorna lista vazia se a conta não tiver campanhas.
     """
+    if _is_invalid_uuid(ad_account_uuid):
+        log.warning(
+            "fetch_meta_campaigns_live.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return []
     row = (
         supabase.table("ad_accounts")
         .select("account_id, token")
@@ -185,6 +216,13 @@ async def fetch_meta_insights_live(
     Retorna spend, impressions, clicks, conversions, cpa, roas, ctr.
     Preferir sobre fetch_daily_metrics quando platform == 'meta'.
     """
+    if _is_invalid_uuid(ad_account_uuid):
+        log.warning(
+            "fetch_meta_insights_live.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return {}
     row = (
         supabase.table("ad_accounts")
         .select("account_id, token")
@@ -486,6 +524,14 @@ Retorne EXCLUSIVAMENTE um JSON (sem markdown, sem texto fora do JSON):
 async def analista_node(state: AgentState) -> dict:
     account = state["account"]
     log.info("analista.start", account_id=account.get("account_id"), platform=account.get("platform"))
+
+    if _is_invalid_uuid(account.get("id")):
+        log.error(
+            "analista.skip",
+            reason="invalid_account_uuid",
+            account_id=account.get("account_id"),
+        )
+        return {"campaigns_analyzed": [], "anomalies": []}
 
     date_end   = datetime.utcnow().date()
     date_start = date_end - timedelta(days=7)
