@@ -100,10 +100,11 @@ def _synthesize_account() -> dict | None:
     }
 
 
-async def run_google_agent(default_client: dict | None = None) -> dict:
+async def run_google_agent(default_client: dict | None = None) -> dict[str, Any]:
     """Roda o ciclo do agente para as contas Google configuradas.
 
     No-op (com log) se ``GOOGLE_ADS_CUSTOMER_ID`` não estiver no ``.env``.
+    Retorna um resumo do ciclo para logging em ``agent.run``.
     """
     customer_id = (settings.google_ads_customer_id or "").strip()
     if not customer_id:
@@ -121,7 +122,12 @@ async def run_google_agent(default_client: dict | None = None) -> dict:
         for row in rows:
             client = row.pop("clients", {}) or {}
             await _run_account(row, client)
-        return {"skipped": False, "source": "supabase", "accounts_processed": len(rows)}
+        return {
+            "skipped": False,
+            "source": "supabase",
+            "accounts_processed": len(rows),
+            "read_only": settings.google_ads_read_only,
+        }
 
     account = _synthesize_account()
     if account is None:  # pragma: no cover - já coberto pelo guard acima
@@ -141,4 +147,5 @@ async def run_google_agent(default_client: dict | None = None) -> dict:
         "source": "env",
         "accounts_processed": 1,
         "customer_id": account["account_id"],
+        "read_only": settings.google_ads_read_only,
     }

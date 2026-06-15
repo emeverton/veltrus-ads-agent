@@ -136,8 +136,15 @@ def _extract_json(text: str) -> dict:
 # FERRAMENTAS — ANALISTA
 # ===========================================================================
 @tool
-async def fetch_account_campaigns(ad_account_uuid: str) -> list[dict]:
+async def fetch_account_campaigns(ad_account_uuid: str | None) -> list[dict]:
     """Busca campanhas não-arquivadas de uma conta de anúncios pelo UUID interno."""
+    if not ad_account_uuid or ad_account_uuid in ("None", "n/a", ""):
+        log.warning(
+            "fetch_campaigns.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return []
     if not is_valid_uuid(ad_account_uuid):
         log.warning(
             "fetch_campaigns.skip",
@@ -145,7 +152,6 @@ async def fetch_account_campaigns(ad_account_uuid: str) -> list[dict]:
             value=ad_account_uuid,
         )
         return []
-
     result = (
         supabase.table("campaigns")
         .select("id, campaign_id, name, platform, status, daily_budget")
@@ -188,6 +194,13 @@ async def fetch_meta_campaigns_live(ad_account_uuid: str) -> list[dict]:
     Retorna campanhas ativas e pausadas. Preferir sobre fetch_account_campaigns
     quando platform == 'meta'. Retorna lista vazia se a conta não tiver campanhas.
     """
+    if not is_valid_uuid(ad_account_uuid):
+        log.warning(
+            "fetch_meta_campaigns.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return []
     row = (
         supabase.table("ad_accounts")
         .select("account_id, token")
@@ -212,6 +225,13 @@ async def fetch_meta_insights_live(
     Retorna spend, impressions, clicks, conversions, cpa, roas, ctr.
     Preferir sobre fetch_daily_metrics quando platform == 'meta'.
     """
+    if not is_valid_uuid(ad_account_uuid):
+        log.warning(
+            "fetch_meta_insights.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return {}
     row = (
         supabase.table("ad_accounts")
         .select("account_id, token")
@@ -586,18 +606,34 @@ Retorne EXCLUSIVAMENTE um JSON (sem markdown, sem texto fora do JSON):
 """.strip()
 
 
+def _account_internal_uuid(account: dict) -> str | None:
+    """UUID interno da conta (ad_accounts.id), ou None se indisponível/inválido."""
+    raw = account.get("id")
+    if raw is None:
+        return None
+    candidate = str(raw).strip()
+    return candidate if is_valid_uuid(candidate) else None
+
+
 async def analista_node(state: AgentState) -> dict:
     account = state["account"]
     log.info("analista.start", account_id=account.get("account_id"), platform=account.get("platform"))
 
     date_end   = datetime.utcnow().date()
     date_start = date_end - timedelta(days=7)
-    ad_account_uuid = account.get("id")
-    safe_ad_account_uuid = ad_account_uuid if is_valid_uuid(ad_account_uuid) else ""
+
+    internal_uuid = _account_internal_uuid(account)
+    if internal_uuid:
+        uuid_line = f"- UUID interno da conta (ad_account): {internal_uuid}"
+    else:
+        uuid_line = (
+            "- UUID interno da conta: indisponível (conta sintetizada via .env). "
+            "NÃO chame fetch_account_campaigns nem fetch_meta_campaigns_live."
+        )
 
     user_prompt = f"""
 Analise as campanhas desta conta:
-- UUID interno da conta (ad_account): {safe_ad_account_uuid or "não disponível"}
+{uuid_line}
 - Plataforma: {account["platform"]}
 - ID externo da conta: {account["account_id"]}
 - Cliente: {state["client"].get("name", "N/A")} ({state["client"].get("vertical", "")})

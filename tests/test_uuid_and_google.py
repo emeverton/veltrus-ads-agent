@@ -197,13 +197,44 @@ async def test_fetch_google_campaigns_live_logs_start(mocker):
 
 
 @pytest.mark.asyncio
+async def test_fetch_account_campaigns_skips_invalid_uuid(mocker):
+    """fetch_account_campaigns não consulta o Supabase com UUID inválido."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    log_spy = mocker.spy(graph.log, "warning")
+
+    for bad in ("None", "n/a", "", None):
+        fake_supabase.reset_mock()
+        out = await graph.fetch_account_campaigns.ainvoke({"ad_account_uuid": bad})
+        assert out == []
+        fake_supabase.table.assert_not_called()
+
+    log_spy.assert_called()
+    assert any(c.args[0] == "fetch_campaigns.skip" for c in log_spy.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_fetch_account_campaigns_queries_with_valid_uuid(mocker):
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    (
+        fake_supabase.table.return_value.select.return_value.eq.return_value.neq.return_value.execute.return_value
+    ).data = [{"id": VALID_UUID, "name": "Camp A"}]
+
+    out = await graph.fetch_account_campaigns.ainvoke({"ad_account_uuid": VALID_UUID})
+
+    fake_supabase.table.assert_called_once_with("campaigns")
+    assert out == [{"id": VALID_UUID, "name": "Camp A"}]
+
+
+@pytest.mark.asyncio
 async def test_run_google_agent_skips_without_customer_id(mocker):
     mocker.patch.object(google_agent.settings, "google_ads_customer_id", "")
     invoke = mocker.patch.object(google_agent.compiled_graph, "ainvoke")
 
-    await google_agent.run_google_agent()
+    result = await google_agent.run_google_agent()
 
     invoke.assert_not_called()
+    assert result["skipped"] is True
+    assert result["reason"] == "no_customer_id"
 
 
 @pytest.mark.asyncio
@@ -225,13 +256,16 @@ async def test_run_google_agent_synthesizes_from_env(mocker):
 
     mocker.patch.object(google_agent.compiled_graph, "ainvoke", side_effect=_ainvoke)
 
-    await google_agent.run_google_agent()
+    result = await google_agent.run_google_agent()
 
     account = captured["state"]["account"]
     assert account["platform"] == "google"
     assert account["account_id"] == "1224681784"  # vem do .env, não hardcoded
     assert account["token"] == "refresh-xyz"
     assert account["id"] == ""
+    assert result["skipped"] is False
+    assert result["source"] == "env"
+    assert result["accounts_processed"] == 1
 
 
 @pytest.mark.asyncio
@@ -244,7 +278,7 @@ async def test_run_all_accounts_logs_google_agent_start_and_done(mocker):
     ).data = []
     google_result = {"skipped": False, "source": "env", "accounts_processed": 1}
     run_google = mocker.patch.object(
-        run_module, "run_google_agent", side_effect=lambda: google_result
+        run_module, "run_google_agent", return_value=google_result
     )
     log_spy = mocker.spy(run_module.log, "info")
 
