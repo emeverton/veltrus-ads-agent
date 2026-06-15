@@ -23,6 +23,7 @@ from typing_extensions import TypedDict
 from agent.config import settings
 from agent.tools import google_ads, meta_ads, normalizer
 from agent.tools.supabase_client import supabase
+from agent.tools.uuid_utils import _is_invalid_uuid
 
 log = structlog.get_logger(__name__)
 
@@ -119,6 +120,9 @@ def _extract_json(text: str) -> dict:
 @tool
 async def fetch_account_campaigns(ad_account_uuid: str) -> list[dict]:
     """Busca campanhas não-arquivadas de uma conta de anúncios pelo UUID interno."""
+    if _is_invalid_uuid(ad_account_uuid):
+        log.warning("fetch_account_campaigns.invalid_uuid", value=ad_account_uuid)
+        return []
     result = (
         supabase.table("campaigns")
         .select("id, campaign_id, name, platform, status, daily_budget")
@@ -138,6 +142,9 @@ async def fetch_daily_metrics(campaign_uuid: str, platform: str = "meta", days: 
     ctr, attribution_window, confidence_score, data_source.
     platform: "meta" | "google" — necessário para normalização correta de seed data.
     """
+    if _is_invalid_uuid(campaign_uuid):
+        log.warning("fetch_daily_metrics.invalid_uuid", value=campaign_uuid)
+        return []
     since = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
     result = (
         supabase.table("daily_metrics")
@@ -223,7 +230,10 @@ async def search_agent_memory(
         .limit(limit)
     )
     if campaign_uuid:
-        qb = qb.eq("campaign_id", campaign_uuid)
+        if _is_invalid_uuid(campaign_uuid):
+            log.warning("search_agent_memory.invalid_uuid_filter_skipped", value=campaign_uuid)
+        else:
+            qb = qb.eq("campaign_id", campaign_uuid)
     result = qb.execute()
     return result.data or []
 
@@ -240,6 +250,17 @@ async def save_decision(
     approved_by: str | None = None,
 ) -> dict:
     """Registra uma decisão do agente em agent_decisions e retorna a linha criada."""
+    if _is_invalid_uuid(campaign_uuid):
+        log.warning(
+            "save_decision.invalid_uuid",
+            value=campaign_uuid,
+            action_type=action_type,
+        )
+        return {
+            "skipped": True,
+            "reason": "invalid_campaign_uuid",
+            "value": campaign_uuid,
+        }
     row: dict[str, Any] = {
         "campaign_id": campaign_uuid,
         "action_type": action_type,
@@ -402,13 +423,16 @@ async def save_memory(
     campaign_uuid: None = memória global; UUID = específica da campanha.
     embedding é null por enquanto — será preenchido quando o serviço de embeddings for integrado.
     """
+    safe_campaign_uuid = None if _is_invalid_uuid(campaign_uuid) else campaign_uuid
+    if campaign_uuid and safe_campaign_uuid is None:
+        log.warning("save_memory.invalid_uuid_normalized_to_null", value=campaign_uuid)
     row: dict[str, Any] = {
         "content": content,
         "memory_type": memory_type,
-        "campaign_id": campaign_uuid,
+        "campaign_id": safe_campaign_uuid,
     }
     result = supabase.table("agent_memory").insert(row).execute()
-    log.info("memorizador.memory_saved", memory_type=memory_type, campaign_uuid=campaign_uuid)
+    log.info("memorizador.memory_saved", memory_type=memory_type, campaign_uuid=safe_campaign_uuid)
     return result.data[0] if result.data else {}
 
 # ===========================================================================
