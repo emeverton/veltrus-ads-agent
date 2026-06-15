@@ -8,6 +8,7 @@ Fluxo por conta de anúncios:
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -100,6 +101,24 @@ async def _agent_loop(
         if isinstance(msg, AIMessage) and msg.content:
             return str(msg.content)
     return ""
+
+
+def is_valid_uuid(value: Any) -> bool:
+    """Retorna True somente se *value* for um UUID válido.
+
+    Protege INSERTs/UPDATes que usam colunas uuid (ex.: agent_decisions.campaign_id),
+    onde o LLM ocasionalmente devolve placeholders como "n/a", "N/A" ou "".
+    """
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if not candidate or candidate.lower() in {"n/a", "na", "none", "null", ""}:
+        return False
+    try:
+        uuid.UUID(candidate)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def _extract_json(text: str) -> dict:
@@ -201,6 +220,34 @@ async def fetch_meta_insights_live(
     )
     return normalizer.normalize_insights(insights, platform="meta")
 
+
+def _google_credentials(refresh_token: str = "") -> dict[str, Any]:
+    """Monta as credenciais OAuth do Google Ads a partir do .env (+ refresh_token opcional)."""
+    return {
+        "client_id": settings.google_ads_client_id,
+        "client_secret": settings.google_ads_client_secret,
+        "refresh_token": refresh_token or settings.google_ads_refresh_token,
+        "login_customer_id": settings.google_ads_login_customer_id or None,
+    }
+
+
+@tool
+async def fetch_google_campaigns_live(customer_id: str) -> list[dict]:
+    """Busca campanhas diretamente da Google Ads API (dados em tempo real).
+
+    customer_id: ID da conta Google Ads (sem hífens). Usa as credenciais OAuth do .env.
+    Retorna campanhas não-removidas com campaign_id, name, status, campaign_budget_id e
+    daily_budget_usd. Preferir sobre fetch_account_campaigns quando platform == 'google'.
+    """
+    log.info("google.list_campaigns.start", customer_id=customer_id)
+    try:
+        campaigns = await google_ads.get_campaigns(customer_id, _google_credentials())
+    except Exception as exc:
+        log.error("google.list_campaigns.failed", customer_id=customer_id, error=str(exc))
+        return []
+    log.info("google.list_campaigns.done", customer_id=customer_id, total=len(campaigns))
+    return campaigns
+
 # ===========================================================================
 # FERRAMENTAS — ESTRATEGISTA
 # ===========================================================================
@@ -240,6 +287,22 @@ async def save_decision(
     approved_by: str | None = None,
 ) -> dict:
     """Registra uma decisão do agente em agent_decisions e retorna a linha criada."""
+    # Guarda anti-UUID inválido: agent_decisions.campaign_id é uuid NOT NULL.
+    # Sem isto, valores como "n/a" quebram o nó com
+    # "invalid input syntax for type uuid".
+    if not is_valid_uuid(campaign_uuid):
+        log.warning(
+            "estrategista.skip_save",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+            action_type=action_type,
+        )
+        return {
+            "skipped": True,
+            "reason": "invalid_campaign_uuid",
+            "value": campaign_uuid,
+        }
+
     row: dict[str, Any] = {
         "campaign_id": campaign_uuid,
         "action_type": action_type,
@@ -308,15 +371,39 @@ async def run_google_action(
     action_type: pause_campaign | activate_campaign | budget_increase | budget_decrease
     amount_micros: obrigatório para ações de budget (USD * 1_000_000).
     """
-    token_row = (
-        supabase.table("ad_accounts")
-        .select("token")
-        .eq("account_id", account_external_id)
-        .eq("platform", "google")
-        .single()
-        .execute()
-    )
-    refresh_token = (token_row.data or {}).get("token", "")
+    # Modo somente-leitura: registra a intenção mas NÃO chama a API do Google.
+    if settings.google_ads_read_only:
+        log.info(
+            "google.action.read_only_skip",
+            action_type=action_type,
+            customer_id=customer_id,
+            campaign_external_id=campaign_external_id,
+        )
+        return {
+            "executed": False,
+            "read_only": True,
+            "action_type": action_type,
+            "customer_id": customer_id,
+            "campaign_external_id": campaign_external_id,
+            "note": "GOOGLE_ADS_READ_ONLY=true — ação registrada mas não executada na API Google",
+        }
+
+    # refresh_token vem da conta no Supabase; cai para o .env quando não houver linha.
+    refresh_token = ""
+    try:
+        token_row = (
+            supabase.table("ad_accounts")
+            .select("token")
+            .eq("account_id", account_external_id)
+            .eq("platform", "google")
+            .maybe_single()
+            .execute()
+        )
+        refresh_token = ((token_row.data if token_row else None) or {}).get("token", "")
+    except Exception as exc:  # pragma: no cover - rede/DB
+        log.warning("google.action.token_lookup_failed", error=str(exc))
+    if not refresh_token:
+        refresh_token = settings.google_ads_refresh_token
     credentials = {
         "client_id": settings.google_ads_client_id,
         "client_secret": settings.google_ads_client_secret,
@@ -402,13 +489,19 @@ async def save_memory(
     campaign_uuid: None = memória global; UUID = específica da campanha.
     embedding é null por enquanto — será preenchido quando o serviço de embeddings for integrado.
     """
+    # campaign_uuid pode ser None (memória global). Se vier preenchido mas inválido
+    # (ex.: "n/a"), normaliza para None em vez de quebrar o INSERT.
+    safe_campaign_uuid = campaign_uuid if is_valid_uuid(campaign_uuid) else None
+    if campaign_uuid and safe_campaign_uuid is None:
+        log.warning("memorizador.invalid_campaign_uuid", value=campaign_uuid)
+
     row: dict[str, Any] = {
         "content": content,
         "memory_type": memory_type,
-        "campaign_id": campaign_uuid,
+        "campaign_id": safe_campaign_uuid,
     }
     result = supabase.table("agent_memory").insert(row).execute()
-    log.info("memorizador.memory_saved", memory_type=memory_type, campaign_uuid=campaign_uuid)
+    log.info("memorizador.memory_saved", memory_type=memory_type, campaign_uuid=safe_campaign_uuid)
     return result.data[0] if result.data else {}
 
 # ===========================================================================
@@ -440,6 +533,12 @@ Para platform == 'meta':
   2. Se lista vazia, use fetch_account_campaigns → campanhas do Supabase
   3. Para cada campanha: fetch_meta_insights_live (retorna UnifiedMetrics normalizado)
   4. Se spend_usd == 0, use fetch_daily_metrics(campaign_uuid, platform="meta")
+
+Para platform == 'google':
+  1. fetch_google_campaigns_live(customer_id) → campanhas em tempo real da Google Ads API
+     (customer_id = ID externo da conta). Loga google.list_campaigns.start.
+  2. Se lista vazia, use fetch_account_campaigns → campanhas do Supabase
+  3. Para cada campanha: fetch_daily_metrics(campaign_uuid, platform="google")
 
 Para outras plataformas:
   1. fetch_account_campaigns → campanhas do Supabase
@@ -507,6 +606,7 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
             fetch_daily_metrics,
             fetch_meta_campaigns_live,
             fetch_meta_insights_live,
+            fetch_google_campaigns_live,
         ],
         system_prompt=_ANALISTA_SYSTEM,
         user_prompt=user_prompt,
@@ -592,8 +692,54 @@ Retorne o JSON conforme especificado.
     if not parsed.get("action_type"):
         parsed = {"action_type": "monitor_only", "reasoning": raw, "campaign_uuid": "", "params": {}}
 
+    # Sanitiza o campaign_uuid antes de seguir para revisor/executor.
+    # O LLM às vezes devolve "n/a"/"N/A"/vazio; tentamos recuperar o UUID real
+    # a partir das anomalias (por id externo ou nome) e, se não der, forçamos
+    # monitor_only para não tentar salvar uma decisão com UUID inválido.
+    if not is_valid_uuid(parsed.get("campaign_uuid")):
+        recovered = _recover_campaign_uuid(parsed, anomalies)
+        if recovered:
+            log.info(
+                "estrategista.campaign_uuid_recovered",
+                value=parsed.get("campaign_uuid"),
+                recovered=recovered,
+            )
+            parsed["campaign_uuid"] = recovered
+        else:
+            log.warning(
+                "estrategista.invalid_campaign_uuid",
+                value=parsed.get("campaign_uuid"),
+                action_type=parsed.get("action_type"),
+            )
+            parsed["campaign_uuid"] = None
+            parsed["action_type"] = "monitor_only"
+
     log.info("estrategista.done", action_type=parsed.get("action_type"))
     return {"decision": parsed, "memory_context": []}
+
+
+def _recover_campaign_uuid(decision: dict, anomalies: list[dict]) -> str | None:
+    """Tenta recuperar um campaign_uuid válido casando a decisão com as anomalias.
+
+    Casamento por campaign_id externo e, em seguida, por nome da campanha.
+    """
+    ext_id = str(decision.get("campaign_id") or "").strip()
+    name = str(decision.get("campaign_name") or "").strip()
+
+    for anomaly in anomalies:
+        candidate = anomaly.get("campaign_uuid")
+        if not is_valid_uuid(candidate):
+            continue
+        if ext_id and str(anomaly.get("campaign_id") or "").strip() == ext_id:
+            return candidate
+        if name and str(anomaly.get("name") or "").strip() == name:
+            return candidate
+
+    # Se houver exatamente uma anomalia com uuid válido, usa-a como fallback.
+    valid = [a.get("campaign_uuid") for a in anomalies if is_valid_uuid(a.get("campaign_uuid"))]
+    if len(valid) == 1:
+        return valid[0]
+    return None
 
 # ===========================================================================
 # NÓ 3: REVISOR

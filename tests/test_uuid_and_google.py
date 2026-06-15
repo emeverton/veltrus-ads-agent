@@ -1,0 +1,216 @@
+"""
+Testes determinísticos (sem LLM / sem APIs externas) para:
+
+FIX #1 — guarda anti-UUID inválido ("n/a") no estrategista/executor.
+FIX #2 — Google Agent com modo somente-leitura e wiring no ciclo.
+
+Tudo mockado: não requer Anthropic, Google Ads nem Supabase real.
+"""
+from __future__ import annotations
+
+import pytest
+
+import agent.graph as graph
+import agent.graphs.google_agent as google_agent
+from agent.graph import (
+    _recover_campaign_uuid,
+    is_valid_uuid,
+    run_google_action,
+    save_decision,
+)
+
+VALID_UUID = "922f2273-6e2f-4649-9961-e510cbc4a9a2"
+
+
+# ---------------------------------------------------------------------------
+# FIX #1 — validação de UUID
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (VALID_UUID, True),
+        ("n/a", False),
+        ("N/A", False),
+        ("", False),
+        ("   ", False),
+        (None, False),
+        (123, False),
+        ("not-a-uuid", False),
+    ],
+)
+def test_is_valid_uuid(value, expected):
+    assert is_valid_uuid(value) is expected
+
+
+@pytest.mark.asyncio
+async def test_save_decision_skips_invalid_uuid(mocker):
+    """save_decision não deve tocar o banco quando o UUID é inválido."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+
+    result = await save_decision.ainvoke(
+        {
+            "campaign_uuid": "n/a",
+            "action_type": "budget_decrease",
+            "reasoning": "teste",
+            "payload": {},
+            "executed": False,
+        }
+    )
+
+    assert result["skipped"] is True
+    assert result["reason"] == "invalid_campaign_uuid"
+    fake_supabase.table.assert_not_called()  # nenhum INSERT tentado
+
+
+@pytest.mark.asyncio
+async def test_save_decision_inserts_with_valid_uuid(mocker):
+    """Com UUID válido, save_decision faz o INSERT normalmente."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    (
+        fake_supabase.table.return_value.insert.return_value.execute.return_value
+    ).data = [{"id": "dec-1", "campaign_id": VALID_UUID}]
+
+    result = await save_decision.ainvoke(
+        {
+            "campaign_uuid": VALID_UUID,
+            "action_type": "monitor_only",
+            "reasoning": "ok",
+            "payload": {"x": 1},
+            "executed": False,
+        }
+    )
+
+    fake_supabase.table.assert_called_once_with("agent_decisions")
+    assert result["id"] == "dec-1"
+
+
+def test_recover_campaign_uuid_by_external_id():
+    decision = {"campaign_id": "EXT-1", "campaign_name": "Camp A"}
+    anomalies = [
+        {"campaign_uuid": "bad", "campaign_id": "EXT-9"},
+        {"campaign_uuid": VALID_UUID, "campaign_id": "EXT-1"},
+    ]
+    assert _recover_campaign_uuid(decision, anomalies) == VALID_UUID
+
+
+def test_recover_campaign_uuid_single_fallback():
+    decision = {"campaign_id": "n/a", "campaign_name": ""}
+    anomalies = [{"campaign_uuid": VALID_UUID, "campaign_id": "X"}]
+    assert _recover_campaign_uuid(decision, anomalies) == VALID_UUID
+
+
+def test_recover_campaign_uuid_none_when_ambiguous():
+    decision = {"campaign_id": "nope", "campaign_name": "nope"}
+    anomalies = [
+        {"campaign_uuid": VALID_UUID, "campaign_id": "A"},
+        {"campaign_uuid": "11111111-1111-1111-1111-111111111111", "campaign_id": "B"},
+    ]
+    assert _recover_campaign_uuid(decision, anomalies) is None
+
+
+# ---------------------------------------------------------------------------
+# FIX #2 — Google read-only e wiring
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_run_google_action_read_only_does_not_call_api(mocker):
+    """Em read-only, run_google_action NÃO chama a API Google nem o Supabase."""
+    mocker.patch.object(graph.settings, "google_ads_read_only", True)
+    fake_google = mocker.patch.object(graph, "google_ads")
+    fake_supabase = mocker.patch.object(graph, "supabase")
+
+    result = await run_google_action.ainvoke(
+        {
+            "action_type": "pause_campaign",
+            "customer_id": "1224681784",
+            "campaign_external_id": "555",
+            "account_external_id": "1224681784",
+        }
+    )
+
+    assert result["read_only"] is True
+    assert result["executed"] is False
+    fake_google.pause_campaign.assert_not_called()
+    fake_supabase.table.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_google_action_executes_when_not_read_only(mocker):
+    """Com read-only desligado, a ação é despachada para a API Google."""
+    mocker.patch.object(graph.settings, "google_ads_read_only", False)
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    (
+        fake_supabase.table.return_value.select.return_value.eq.return_value.eq.return_value.maybe_single.return_value.execute.return_value
+    ).data = {"token": "refresh-xyz"}
+    fake_google = mocker.patch.object(graph, "google_ads")
+
+    async def _ok(*a, **k):
+        return {"status": "paused"}
+
+    fake_google.pause_campaign.side_effect = _ok
+
+    result = await run_google_action.ainvoke(
+        {
+            "action_type": "pause_campaign",
+            "customer_id": "1224681784",
+            "campaign_external_id": "555",
+            "account_external_id": "1224681784",
+        }
+    )
+
+    fake_google.pause_campaign.assert_called_once()
+    assert result == {"status": "paused"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_google_campaigns_live_logs_start(mocker):
+    """fetch_google_campaigns_live emite google.list_campaigns.start e usa get_campaigns."""
+    fake_google = mocker.patch.object(graph, "google_ads")
+
+    async def _campaigns(customer_id, creds):
+        return [{"campaign_id": "1", "name": "C1"}]
+
+    fake_google.get_campaigns.side_effect = _campaigns
+    log_spy = mocker.spy(graph.log, "info")
+
+    out = await graph.fetch_google_campaigns_live.ainvoke({"customer_id": "1224681784"})
+
+    assert out == [{"campaign_id": "1", "name": "C1"}]
+    events = [c.args[0] for c in log_spy.call_args_list if c.args]
+    assert "google.list_campaigns.start" in events
+
+
+@pytest.mark.asyncio
+async def test_run_google_agent_skips_without_customer_id(mocker):
+    mocker.patch.object(google_agent.settings, "google_ads_customer_id", "")
+    invoke = mocker.patch.object(google_agent.compiled_graph, "ainvoke")
+
+    await google_agent.run_google_agent()
+
+    invoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_google_agent_synthesizes_from_env(mocker):
+    """Sem conta no Supabase, sintetiza do .env e roda o grafo (read-only)."""
+    mocker.patch.object(google_agent.settings, "google_ads_customer_id", "1224681784")
+    mocker.patch.object(google_agent.settings, "google_ads_refresh_token", "refresh-xyz")
+    mocker.patch.object(google_agent.settings, "google_ads_read_only", True)
+    mocker.patch.object(google_agent, "_fetch_google_accounts", return_value=[])
+    mocker.patch.object(
+        google_agent, "_resolve_default_client", return_value={"name": "Cajé", "business_dna": {}}
+    )
+
+    captured = {}
+
+    async def _ainvoke(state):
+        captured["state"] = state
+        return state
+
+    mocker.patch.object(google_agent.compiled_graph, "ainvoke", side_effect=_ainvoke)
+
+    await google_agent.run_google_agent()
+
+    account = captured["state"]["account"]
+    assert account["platform"] == "google"
+    assert account["account_id"] == "1224681784"  # vem do .env, não hardcoded
+    assert account["token"] == "refresh-xyz"
