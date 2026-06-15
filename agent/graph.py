@@ -8,6 +8,7 @@ Fluxo por conta de anúncios:
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -100,6 +101,24 @@ async def _agent_loop(
         if isinstance(msg, AIMessage) and msg.content:
             return str(msg.content)
     return ""
+
+
+def is_valid_uuid(value: Any) -> bool:
+    """Retorna True somente se *value* for um UUID válido.
+
+    Protege INSERTs/UPDATes que usam colunas uuid (ex.: agent_decisions.campaign_id),
+    onde o LLM ocasionalmente devolve placeholders como "n/a", "N/A" ou "".
+    """
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if not candidate or candidate.lower() in {"n/a", "na", "none", "null", ""}:
+        return False
+    try:
+        uuid.UUID(candidate)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def _extract_json(text: str) -> dict:
@@ -240,6 +259,22 @@ async def save_decision(
     approved_by: str | None = None,
 ) -> dict:
     """Registra uma decisão do agente em agent_decisions e retorna a linha criada."""
+    # Guarda anti-UUID inválido: agent_decisions.campaign_id é uuid NOT NULL.
+    # Sem isto, valores como "n/a" quebram o nó com
+    # "invalid input syntax for type uuid".
+    if not is_valid_uuid(campaign_uuid):
+        log.warning(
+            "estrategista.skip_save",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+            action_type=action_type,
+        )
+        return {
+            "skipped": True,
+            "reason": "invalid_campaign_uuid",
+            "value": campaign_uuid,
+        }
+
     row: dict[str, Any] = {
         "campaign_id": campaign_uuid,
         "action_type": action_type,
@@ -402,13 +437,19 @@ async def save_memory(
     campaign_uuid: None = memória global; UUID = específica da campanha.
     embedding é null por enquanto — será preenchido quando o serviço de embeddings for integrado.
     """
+    # campaign_uuid pode ser None (memória global). Se vier preenchido mas inválido
+    # (ex.: "n/a"), normaliza para None em vez de quebrar o INSERT.
+    safe_campaign_uuid = campaign_uuid if is_valid_uuid(campaign_uuid) else None
+    if campaign_uuid and safe_campaign_uuid is None:
+        log.warning("memorizador.invalid_campaign_uuid", value=campaign_uuid)
+
     row: dict[str, Any] = {
         "content": content,
         "memory_type": memory_type,
-        "campaign_id": campaign_uuid,
+        "campaign_id": safe_campaign_uuid,
     }
     result = supabase.table("agent_memory").insert(row).execute()
-    log.info("memorizador.memory_saved", memory_type=memory_type, campaign_uuid=campaign_uuid)
+    log.info("memorizador.memory_saved", memory_type=memory_type, campaign_uuid=safe_campaign_uuid)
     return result.data[0] if result.data else {}
 
 # ===========================================================================
@@ -592,8 +633,54 @@ Retorne o JSON conforme especificado.
     if not parsed.get("action_type"):
         parsed = {"action_type": "monitor_only", "reasoning": raw, "campaign_uuid": "", "params": {}}
 
+    # Sanitiza o campaign_uuid antes de seguir para revisor/executor.
+    # O LLM às vezes devolve "n/a"/"N/A"/vazio; tentamos recuperar o UUID real
+    # a partir das anomalias (por id externo ou nome) e, se não der, forçamos
+    # monitor_only para não tentar salvar uma decisão com UUID inválido.
+    if not is_valid_uuid(parsed.get("campaign_uuid")):
+        recovered = _recover_campaign_uuid(parsed, anomalies)
+        if recovered:
+            log.info(
+                "estrategista.campaign_uuid_recovered",
+                value=parsed.get("campaign_uuid"),
+                recovered=recovered,
+            )
+            parsed["campaign_uuid"] = recovered
+        else:
+            log.warning(
+                "estrategista.invalid_campaign_uuid",
+                value=parsed.get("campaign_uuid"),
+                action_type=parsed.get("action_type"),
+            )
+            parsed["campaign_uuid"] = None
+            parsed["action_type"] = "monitor_only"
+
     log.info("estrategista.done", action_type=parsed.get("action_type"))
     return {"decision": parsed, "memory_context": []}
+
+
+def _recover_campaign_uuid(decision: dict, anomalies: list[dict]) -> str | None:
+    """Tenta recuperar um campaign_uuid válido casando a decisão com as anomalias.
+
+    Casamento por campaign_id externo e, em seguida, por nome da campanha.
+    """
+    ext_id = str(decision.get("campaign_id") or "").strip()
+    name = str(decision.get("campaign_name") or "").strip()
+
+    for anomaly in anomalies:
+        candidate = anomaly.get("campaign_uuid")
+        if not is_valid_uuid(candidate):
+            continue
+        if ext_id and str(anomaly.get("campaign_id") or "").strip() == ext_id:
+            return candidate
+        if name and str(anomaly.get("name") or "").strip() == name:
+            return candidate
+
+    # Se houver exatamente uma anomalia com uuid válido, usa-a como fallback.
+    valid = [a.get("campaign_uuid") for a in anomalies if is_valid_uuid(a.get("campaign_uuid"))]
+    if len(valid) == 1:
+        return valid[0]
+    return None
 
 # ===========================================================================
 # NÓ 3: REVISOR
