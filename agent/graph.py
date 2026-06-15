@@ -8,6 +8,7 @@ Fluxo por conta de anúncios:
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -25,6 +26,15 @@ from agent.tools import google_ads, meta_ads, normalizer
 from agent.tools.supabase_client import supabase
 
 log = structlog.get_logger(__name__)
+
+
+def is_valid_uuid(v: Any) -> bool:
+    """Retorna True se v for uma string UUID v4 válida."""
+    try:
+        uuid.UUID(str(v))
+        return True
+    except (ValueError, AttributeError):
+        return False
 
 # ---------------------------------------------------------------------------
 # LLM
@@ -240,6 +250,14 @@ async def save_decision(
     approved_by: str | None = None,
 ) -> dict:
     """Registra uma decisão do agente em agent_decisions e retorna a linha criada."""
+    if not is_valid_uuid(campaign_uuid):
+        log.warning(
+            "executor.save_decision.skip",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+        )
+        return {"skipped": True, "reason": "invalid_uuid", "value": campaign_uuid}
+
     row: dict[str, Any] = {
         "campaign_id": campaign_uuid,
         "action_type": action_type,
@@ -591,6 +609,20 @@ Retorne o JSON conforme especificado.
     parsed = _extract_json(raw)
     if not parsed.get("action_type"):
         parsed = {"action_type": "monitor_only", "reasoning": raw, "campaign_uuid": "", "params": {}}
+
+    campaign_uuid = parsed.get("campaign_uuid", "")
+    if campaign_uuid and not is_valid_uuid(campaign_uuid):
+        log.warning(
+            "estrategista.skip",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+        )
+        parsed = {
+            "action_type": "monitor_only",
+            "reasoning": f"campaign_uuid inválido ignorado: {campaign_uuid!r}",
+            "campaign_uuid": "",
+            "params": {},
+        }
 
     log.info("estrategista.done", action_type=parsed.get("action_type"))
     return {"decision": parsed, "memory_context": []}

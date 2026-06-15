@@ -13,7 +13,9 @@ from datetime import datetime
 
 import structlog
 
+from agent.config import settings
 from agent.graph import AgentState, compiled_graph
+from agent.graphs.google_agent import build_credentials_from_settings, run_google_agent
 from agent.tools.supabase_client import supabase
 
 log = structlog.get_logger(__name__)
@@ -52,6 +54,9 @@ async def run_all_accounts() -> None:
 
     Sequencial (não paralelo) para evitar sobrecarga simultânea nas APIs de ads
     e na cota do LLM. Paralelizar por plataforma é uma evolução futura segura.
+
+    Ao final, executa google_agent para o GOOGLE_ADS_CUSTOMER_ID global (se configurado),
+    independentemente de haver contas no Supabase.
     """
     started_at = datetime.utcnow()
     log.info("run.cycle.start", started_at=started_at.isoformat())
@@ -66,28 +71,42 @@ async def run_all_accounts() -> None:
 
     if not rows:
         log.warning("run.cycle.no_active_accounts")
-        return
+    else:
+        # Filtra contas cujo cliente também está ativo
+        accounts_to_run = [
+            row for row in rows
+            if (row.get("clients") or {}).get("active", True)
+        ]
 
-    # Filtra contas cujo cliente também está ativo
-    accounts_to_run = [
-        row for row in rows
-        if (row.get("clients") or {}).get("active", True)
-    ]
+        log.info("run.cycle.accounts_found", total=len(rows), eligible=len(accounts_to_run))
 
-    log.info("run.cycle.accounts_found", total=len(rows), eligible=len(accounts_to_run))
+        errors = 0
+        for row in accounts_to_run:
+            client = row.pop("clients", {}) or {}
+            await run_account(account=row, client=client)
 
-    errors = 0
-    for row in accounts_to_run:
-        client = row.pop("clients", {}) or {}
-        await run_account(account=row, client=client)
+        elapsed = (datetime.utcnow() - started_at).total_seconds()
+        log.info(
+            "run.cycle.done",
+            accounts_processed=len(accounts_to_run),
+            errors=errors,
+            elapsed_seconds=round(elapsed, 1),
+        )
 
-    elapsed = (datetime.utcnow() - started_at).total_seconds()
-    log.info(
-        "run.cycle.done",
-        accounts_processed=len(accounts_to_run),
-        errors=errors,
-        elapsed_seconds=round(elapsed, 1),
-    )
+    # Executa google_agent direto via GOOGLE_ADS_CUSTOMER_ID (env var) se configurado.
+    # Roda independentemente do número de contas no Supabase — útil para MCC / customer IDs globais.
+    if settings.google_ads_customer_id:
+        log.info("run.google_agent.start", customer_id=settings.google_ads_customer_id)
+        try:
+            await run_google_agent(
+                settings.google_ads_customer_id,
+                build_credentials_from_settings(),
+            )
+        except Exception:
+            log.exception(
+                "run.google_agent.error",
+                customer_id=settings.google_ads_customer_id,
+            )
 
 
 if __name__ == "__main__":
