@@ -13,6 +13,7 @@ from datetime import datetime
 
 import structlog
 
+from agent.config import settings
 from agent.graph import AgentState, compiled_graph
 from agent.tools.supabase_client import supabase
 
@@ -43,6 +44,32 @@ async def run_account(account: dict, client: dict) -> None:
         log.info("run.account.done", account_id=account_id, platform=platform)
     except Exception:
         log.exception("run.account.error", account_id=account_id, platform=platform)
+
+
+async def run_google_agent(account: dict, client: dict) -> dict:
+    """Executa o grafo para uma conta Google Ads com logging explícito.
+
+    Usa account["account_id"] como customer_id; se ausente ou inválido, aplica
+    GOOGLE_ADS_CUSTOMER_ID do .env como fallback.
+    """
+    raw_customer_id = account.get("account_id") or ""
+    customer_id = raw_customer_id if raw_customer_id not in ("None", "n/a", "") \
+        else settings.google_ads_customer_id
+
+    log.info("google.agent.start", customer_id=customer_id)
+
+    enriched_account = {**account, "account_id": customer_id}
+    result: dict = {"status": "unknown", "customer_id": customer_id}
+
+    try:
+        await run_account(account=enriched_account, client=client)
+        result = {"status": "done", "customer_id": customer_id}
+    except Exception:
+        log.exception("google.agent.error", customer_id=customer_id)
+        result = {"status": "error", "customer_id": customer_id}
+
+    log.info("google.agent.done", result=result)
+    return result
 
 
 async def run_all_accounts() -> None:
@@ -79,7 +106,10 @@ async def run_all_accounts() -> None:
     errors = 0
     for row in accounts_to_run:
         client = row.pop("clients", {}) or {}
-        await run_account(account=row, client=client)
+        if row.get("platform") == "google":
+            await run_google_agent(account=row, client=client)
+        else:
+            await run_account(account=row, client=client)
 
     elapsed = (datetime.utcnow() - started_at).total_seconds()
     log.info(
