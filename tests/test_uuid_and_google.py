@@ -11,9 +11,11 @@ from __future__ import annotations
 import pytest
 
 import agent.graph as graph
+import agent.run as run_module
 import agent.graphs.google_agent as google_agent
 from agent.graph import (
     _recover_campaign_uuid,
+    fetch_account_campaigns,
     is_valid_uuid,
     run_google_action,
     save_decision,
@@ -82,6 +84,21 @@ async def test_save_decision_inserts_with_valid_uuid(mocker):
 
     fake_supabase.table.assert_called_once_with("agent_decisions")
     assert result["id"] == "dec-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["None", "n/a", ""])
+async def test_fetch_account_campaigns_skips_invalid_ad_account_uuid(mocker, value):
+    """fetch_account_campaigns não deve consultar UUID inválido no Supabase."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    log_spy = mocker.spy(graph.log, "warning")
+
+    result = await fetch_account_campaigns.ainvoke({"ad_account_uuid": value})
+
+    assert result == []
+    fake_supabase.table.assert_not_called()
+    events = [c.args[0] for c in log_spy.call_args_list if c.args]
+    assert "fetch_campaigns.skip" in events
 
 
 def test_recover_campaign_uuid_by_external_id():
@@ -214,3 +231,26 @@ async def test_run_google_agent_synthesizes_from_env(mocker):
     assert account["platform"] == "google"
     assert account["account_id"] == "1224681784"  # vem do .env, não hardcoded
     assert account["token"] == "refresh-xyz"
+    assert account["id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_run_all_accounts_logs_google_agent_start_and_done(mocker):
+    """run.py deve chamar o Google Agent e emitir os logs exigidos quando há customer_id."""
+    mocker.patch.object(run_module.settings, "google_ads_customer_id", " 1224681784 ")
+    (
+        mocker.patch.object(run_module, "supabase")
+        .table.return_value.select.return_value.eq.return_value.execute.return_value
+    ).data = []
+    google_result = {"skipped": False, "source": "env", "accounts_processed": 1}
+    run_google = mocker.patch.object(
+        run_module, "run_google_agent", side_effect=lambda: google_result
+    )
+    log_spy = mocker.spy(run_module.log, "info")
+
+    await run_module.run_all_accounts()
+
+    run_google.assert_called_once()
+    events = [c.args[0] for c in log_spy.call_args_list if c.args]
+    assert "google.agent.start" in events
+    assert "google.agent.done" in events

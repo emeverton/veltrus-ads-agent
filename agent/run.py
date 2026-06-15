@@ -84,8 +84,11 @@ async def run_all_accounts() -> None:
         await run_account(account=row, client=client)
 
     # Ativa o Google Agent quando GOOGLE_ADS_CUSTOMER_ID está configurado no .env.
-    if settings.google_ads_customer_id:
-        await run_google_agent()
+    customer_id = (settings.google_ads_customer_id or "").strip()
+    if customer_id:
+        log.info("google.agent.start", customer_id=customer_id)
+        google_result = await run_google_agent()
+        log.info("google.agent.done", result=google_result)
     else:
         log.info("run.cycle.google_disabled", reason="no_customer_id")
 

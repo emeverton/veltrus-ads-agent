@@ -88,11 +88,11 @@ def _resolve_default_client() -> dict[str, Any]:
 
 
 def _synthesize_account() -> dict | None:
-    customer_id = settings.google_ads_customer_id
+    customer_id = (settings.google_ads_customer_id or "").strip()
     if not customer_id:
         return None
     return {
-        "id": None,  # sem linha correspondente em ad_accounts
+        "id": "",  # sem linha correspondente em ad_accounts; evita "None" no prompt do LLM
         "platform": "google",
         "account_id": customer_id,
         "token": settings.google_ads_refresh_token,
@@ -100,14 +100,15 @@ def _synthesize_account() -> dict | None:
     }
 
 
-async def run_google_agent(default_client: dict | None = None) -> None:
+async def run_google_agent(default_client: dict | None = None) -> dict:
     """Roda o ciclo do agente para as contas Google configuradas.
 
     No-op (com log) se ``GOOGLE_ADS_CUSTOMER_ID`` não estiver no ``.env``.
     """
-    if not settings.google_ads_customer_id:
+    customer_id = (settings.google_ads_customer_id or "").strip()
+    if not customer_id:
         log.info("google_agent.skip", reason="no_customer_id")
-        return
+        return {"skipped": True, "reason": "no_customer_id"}
 
     rows = _fetch_google_accounts()
     if rows:
@@ -120,12 +121,12 @@ async def run_google_agent(default_client: dict | None = None) -> None:
         for row in rows:
             client = row.pop("clients", {}) or {}
             await _run_account(row, client)
-        return
+        return {"skipped": False, "source": "supabase", "accounts_processed": len(rows)}
 
     account = _synthesize_account()
     if account is None:  # pragma: no cover - já coberto pelo guard acima
         log.info("google_agent.skip", reason="no_customer_id")
-        return
+        return {"skipped": True, "reason": "no_customer_id"}
 
     client = default_client or _resolve_default_client()
     log.info(
@@ -135,3 +136,9 @@ async def run_google_agent(default_client: dict | None = None) -> None:
         read_only=settings.google_ads_read_only,
     )
     await _run_account(account, client)
+    return {
+        "skipped": False,
+        "source": "env",
+        "accounts_processed": 1,
+        "customer_id": account["account_id"],
+    }

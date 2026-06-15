@@ -138,6 +138,14 @@ def _extract_json(text: str) -> dict:
 @tool
 async def fetch_account_campaigns(ad_account_uuid: str) -> list[dict]:
     """Busca campanhas não-arquivadas de uma conta de anúncios pelo UUID interno."""
+    if not is_valid_uuid(ad_account_uuid):
+        log.warning(
+            "fetch_campaigns.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return []
+
     result = (
         supabase.table("campaigns")
         .select("id, campaign_id, name, platform, status, daily_budget")
@@ -532,7 +540,8 @@ Para platform == 'meta':
 Para platform == 'google':
   1. fetch_google_campaigns_live(customer_id) → campanhas em tempo real da Google Ads API
      (customer_id = ID externo da conta). Loga google.list_campaigns.start.
-  2. Se lista vazia, use fetch_account_campaigns → campanhas do Supabase
+  2. Se lista vazia e houver UUID interno válido da conta, use fetch_account_campaigns → campanhas do Supabase.
+     Se o UUID interno estiver "não disponível", NÃO chame fetch_account_campaigns.
   3. Para cada campanha: fetch_daily_metrics(campaign_uuid, platform="google")
 
 Para outras plataformas:
@@ -583,10 +592,12 @@ async def analista_node(state: AgentState) -> dict:
 
     date_end   = datetime.utcnow().date()
     date_start = date_end - timedelta(days=7)
+    ad_account_uuid = account.get("id")
+    safe_ad_account_uuid = ad_account_uuid if is_valid_uuid(ad_account_uuid) else ""
 
     user_prompt = f"""
 Analise as campanhas desta conta:
-- UUID interno da conta (ad_account): {account["id"]}
+- UUID interno da conta (ad_account): {safe_ad_account_uuid or "não disponível"}
 - Plataforma: {account["platform"]}
 - ID externo da conta: {account["account_id"]}
 - Cliente: {state["client"].get("name", "N/A")} ({state["client"].get("vertical", "")})
