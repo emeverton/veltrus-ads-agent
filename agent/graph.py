@@ -220,6 +220,34 @@ async def fetch_meta_insights_live(
     )
     return normalizer.normalize_insights(insights, platform="meta")
 
+
+def _google_credentials(refresh_token: str = "") -> dict[str, Any]:
+    """Monta as credenciais OAuth do Google Ads a partir do .env (+ refresh_token opcional)."""
+    return {
+        "client_id": settings.google_ads_client_id,
+        "client_secret": settings.google_ads_client_secret,
+        "refresh_token": refresh_token or settings.google_ads_refresh_token,
+        "login_customer_id": settings.google_ads_login_customer_id or None,
+    }
+
+
+@tool
+async def fetch_google_campaigns_live(customer_id: str) -> list[dict]:
+    """Busca campanhas diretamente da Google Ads API (dados em tempo real).
+
+    customer_id: ID da conta Google Ads (sem hífens). Usa as credenciais OAuth do .env.
+    Retorna campanhas não-removidas com campaign_id, name, status, campaign_budget_id e
+    daily_budget_usd. Preferir sobre fetch_account_campaigns quando platform == 'google'.
+    """
+    log.info("google.list_campaigns.start", customer_id=customer_id)
+    try:
+        campaigns = await google_ads.get_campaigns(customer_id, _google_credentials())
+    except Exception as exc:
+        log.error("google.list_campaigns.failed", customer_id=customer_id, error=str(exc))
+        return []
+    log.info("google.list_campaigns.done", customer_id=customer_id, total=len(campaigns))
+    return campaigns
+
 # ===========================================================================
 # FERRAMENTAS — ESTRATEGISTA
 # ===========================================================================
@@ -343,15 +371,39 @@ async def run_google_action(
     action_type: pause_campaign | activate_campaign | budget_increase | budget_decrease
     amount_micros: obrigatório para ações de budget (USD * 1_000_000).
     """
-    token_row = (
-        supabase.table("ad_accounts")
-        .select("token")
-        .eq("account_id", account_external_id)
-        .eq("platform", "google")
-        .single()
-        .execute()
-    )
-    refresh_token = (token_row.data or {}).get("token", "")
+    # Modo somente-leitura: registra a intenção mas NÃO chama a API do Google.
+    if settings.google_ads_read_only:
+        log.info(
+            "google.action.read_only_skip",
+            action_type=action_type,
+            customer_id=customer_id,
+            campaign_external_id=campaign_external_id,
+        )
+        return {
+            "executed": False,
+            "read_only": True,
+            "action_type": action_type,
+            "customer_id": customer_id,
+            "campaign_external_id": campaign_external_id,
+            "note": "GOOGLE_ADS_READ_ONLY=true — ação registrada mas não executada na API Google",
+        }
+
+    # refresh_token vem da conta no Supabase; cai para o .env quando não houver linha.
+    refresh_token = ""
+    try:
+        token_row = (
+            supabase.table("ad_accounts")
+            .select("token")
+            .eq("account_id", account_external_id)
+            .eq("platform", "google")
+            .maybe_single()
+            .execute()
+        )
+        refresh_token = ((token_row.data if token_row else None) or {}).get("token", "")
+    except Exception as exc:  # pragma: no cover - rede/DB
+        log.warning("google.action.token_lookup_failed", error=str(exc))
+    if not refresh_token:
+        refresh_token = settings.google_ads_refresh_token
     credentials = {
         "client_id": settings.google_ads_client_id,
         "client_secret": settings.google_ads_client_secret,
@@ -482,6 +534,12 @@ Para platform == 'meta':
   3. Para cada campanha: fetch_meta_insights_live (retorna UnifiedMetrics normalizado)
   4. Se spend_usd == 0, use fetch_daily_metrics(campaign_uuid, platform="meta")
 
+Para platform == 'google':
+  1. fetch_google_campaigns_live(customer_id) → campanhas em tempo real da Google Ads API
+     (customer_id = ID externo da conta). Loga google.list_campaigns.start.
+  2. Se lista vazia, use fetch_account_campaigns → campanhas do Supabase
+  3. Para cada campanha: fetch_daily_metrics(campaign_uuid, platform="google")
+
 Para outras plataformas:
   1. fetch_account_campaigns → campanhas do Supabase
   2. fetch_daily_metrics(campaign_uuid, platform="google"|"meta")
@@ -548,6 +606,7 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
             fetch_daily_metrics,
             fetch_meta_campaigns_live,
             fetch_meta_insights_live,
+            fetch_google_campaigns_live,
         ],
         system_prompt=_ANALISTA_SYSTEM,
         user_prompt=user_prompt,
