@@ -25,6 +25,7 @@ from agent.config import settings
 from agent.tools import google_ads, meta_ads, normalizer
 from agent.tools.campaign_registry import (
     get_campaign_id_map,
+    get_campaign_real_roas,
     merge_campaign_id_map,
     register_campaigns_safe,
     set_campaign_id_map,
@@ -813,6 +814,22 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
         parsed.get("anomalies", []),
         campaign_id_map,
     )
+
+    # Enriquecer campanhas com ROAS real baseado em deals fechados no CRM
+    for campaign in campaigns_analyzed:
+        ext_id = campaign.get("campaign_id") or campaign.get("id")
+        uuid = campaign_id_map.get(str(ext_id)) if ext_id else None
+        if uuid:
+            real = get_campaign_real_roas(uuid)
+            campaign["revenue_real"] = real.get("revenue_closed", 0)
+            campaign["leads_total"] = real.get("leads_total", 0)
+            campaign["deals_closed"] = real.get("deals_closed", 0)
+            spend = campaign.get("spend")
+            campaign["roas_real"] = (
+                round(real["revenue_closed"] / spend, 2)
+                if spend and real["revenue_closed"] > 0
+                else None
+            )
 
     log.info(
         "analista.done",
