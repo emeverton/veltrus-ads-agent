@@ -8,11 +8,14 @@ Tudo mockado: não requer Anthropic, Google Ads nem Supabase real.
 """
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 import agent.graph as graph
 import agent.run as run_module
 import agent.graphs.google_agent as google_agent
+import agent.tools.campaign_registry as campaign_registry
 import agent.tools.google_ads as google_ads_tools
 from agent.graph import (
     _is_invalid_uuid,
@@ -29,6 +32,7 @@ from agent.graph import (
 VALID_UUID = "922f2273-6e2f-4649-9961-e510cbc4a9a2"
 VALID_UUID_2 = "f888f617-1692-4d9d-852f-a9d46a02b917"
 META_NUMERIC_CAMPAIGN_ID = "120249189080650247"
+GOOGLE_CAMPAIGN_ID = "555"
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +70,91 @@ def test_is_valid_uuid(value, expected):
 def test_is_invalid_uuid(value, expected_invalid):
     assert _is_invalid_uuid(value) is expected_invalid
     assert is_invalid_uuid(value) is expected_invalid
+
+
+@pytest.mark.asyncio
+async def test_upsert_campaigns_creates_new_campaign_with_uuid(mocker):
+    """upsert_campaigns cria campanha nova com UUID interno e retorna o mapa."""
+    mocker.patch.object(campaign_registry, "_fetch_existing_campaign_id", return_value=None)
+    insert = mocker.patch.object(campaign_registry, "_insert_campaign", return_value=None)
+    update = mocker.patch.object(campaign_registry, "_update_campaign")
+    mocker.patch.object(campaign_registry.uuid, "uuid4", return_value=uuid.UUID(VALID_UUID))
+
+    result = await campaign_registry.upsert_campaigns(
+        VALID_UUID_2,
+        [
+            {
+                "campaign_id": META_NUMERIC_CAMPAIGN_ID,
+                "name": "Campanha Meta",
+                "status": "ACTIVE",
+                "objective": "OUTCOME_SALES",
+                "daily_budget_usd": 42.5,
+            }
+        ],
+        "meta",
+    )
+
+    inserted = insert.call_args.args[0]
+    assert result == {META_NUMERIC_CAMPAIGN_ID: VALID_UUID}
+    assert inserted["id"] == VALID_UUID
+    assert inserted["account_id"] == VALID_UUID_2
+    assert inserted["campaign_id"] == META_NUMERIC_CAMPAIGN_ID
+    assert inserted["daily_budget"] == 42.5
+    assert inserted["platform"] == "meta"
+    update.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upsert_campaigns_updates_existing_campaign_same_campaign_id(mocker):
+    """upsert_campaigns atualiza campanha existente pelo mesmo campaign_id externo."""
+    mocker.patch.object(campaign_registry, "_fetch_existing_campaign_id", return_value=VALID_UUID)
+    insert = mocker.patch.object(campaign_registry, "_insert_campaign")
+    update = mocker.patch.object(campaign_registry, "_update_campaign")
+
+    result = await campaign_registry.upsert_campaigns(
+        VALID_UUID_2,
+        [
+            {
+                "campaign_id": GOOGLE_CAMPAIGN_ID,
+                "name": "Search Brand",
+                "status": "PAUSED",
+                "daily_budget_usd": 15,
+            }
+        ],
+        "google",
+    )
+
+    updated_id, row = update.call_args.args
+    assert result == {GOOGLE_CAMPAIGN_ID: VALID_UUID}
+    assert updated_id == VALID_UUID
+    assert row["account_id"] == VALID_UUID_2
+    assert row["campaign_id"] == GOOGLE_CAMPAIGN_ID
+    assert row["name"] == "Search Brand"
+    assert row["daily_budget"] == 15.0
+    insert.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upsert_campaigns_returns_external_id_to_uuid_map(mocker):
+    """upsert_campaigns retorna mapa completo {external_id: uuid} para uso no ciclo."""
+    mocker.patch.object(
+        campaign_registry,
+        "_fetch_existing_campaign_id",
+        side_effect=[VALID_UUID, None],
+    )
+    mocker.patch.object(campaign_registry, "_update_campaign")
+    mocker.patch.object(campaign_registry, "_insert_campaign", return_value=VALID_UUID_2)
+
+    result = await campaign_registry.upsert_campaigns(
+        VALID_UUID_2,
+        [
+            {"campaign_id": "EXT-1", "name": "Existente"},
+            {"campaign_id": "EXT-2", "name": "Nova"},
+        ],
+        "meta",
+    )
+
+    assert result == {"EXT-1": VALID_UUID, "EXT-2": VALID_UUID_2}
 
 
 @pytest.mark.asyncio
@@ -142,6 +231,32 @@ async def test_save_decision_inserts_with_valid_uuid(mocker):
 
 
 @pytest.mark.asyncio
+async def test_save_decision_uses_real_uuid_from_campaign_id_map(mocker):
+    """save_decision deve registrar com UUID interno quando o ciclo mapeou o ID externo."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    (
+        fake_supabase.table.return_value.insert.return_value.execute.return_value
+    ).data = [{"id": "dec-2", "campaign_id": VALID_UUID}]
+
+    args = graph._resolve_tool_campaign_uuid_args(
+        "save_decision",
+        {
+            "campaign_uuid": META_NUMERIC_CAMPAIGN_ID,
+            "action_type": "monitor_only",
+            "reasoning": "ok",
+            "payload": {},
+            "executed": False,
+        },
+        {META_NUMERIC_CAMPAIGN_ID: VALID_UUID},
+    )
+    result = await save_decision.ainvoke(args)
+
+    inserted = fake_supabase.table.return_value.insert.call_args.args[0]
+    assert inserted["campaign_id"] == VALID_UUID
+    assert result["id"] == "dec-2"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("value", ["None", "n/a", "", META_NUMERIC_CAMPAIGN_ID])
 async def test_fetch_account_campaigns_skips_invalid_ad_account_uuid(mocker, value):
     """fetch_account_campaigns não deve consultar UUID inválido no Supabase."""
@@ -170,6 +285,27 @@ async def test_fetch_daily_metrics_skips_numeric_meta_campaign_id(mocker):
     fake_supabase.table.assert_not_called()
     events = [c.args[0] for c in log_spy.call_args_list if c.args]
     assert "fetch_daily_metrics.skip" in events
+
+
+@pytest.mark.asyncio
+async def test_fetch_daily_metrics_uses_real_uuid_from_campaign_id_map(mocker):
+    """campaign_id_map troca ID externo por UUID real antes do fetch_daily_metrics."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    (
+        fake_supabase.table.return_value.select.return_value.eq.return_value.gte.return_value.order.return_value.execute.return_value
+    ).data = [{"date": "2026-06-01", "spend": 10}]
+
+    args = graph._resolve_tool_campaign_uuid_args(
+        "fetch_daily_metrics",
+        {"campaign_uuid": META_NUMERIC_CAMPAIGN_ID, "platform": "meta", "days": 7},
+        {META_NUMERIC_CAMPAIGN_ID: VALID_UUID},
+    )
+    result = await fetch_daily_metrics.ainvoke(args)
+
+    fake_supabase.table.assert_called_once_with("daily_metrics")
+    eq_calls = fake_supabase.table.return_value.select.return_value.eq.call_args_list
+    assert eq_calls[0].args == ("campaign_id", VALID_UUID)
+    assert len(result) == 1
 
 
 def test_recover_campaign_uuid_by_external_id():
@@ -215,6 +351,37 @@ async def test_save_memory_nulls_numeric_campaign_uuid(mocker):
     inserted = fake_supabase.table.return_value.insert.call_args.args[0]
     assert inserted["campaign_id"] is None
     assert result["id"] == "mem-1"
+
+
+@pytest.mark.asyncio
+async def test_save_memory_uses_real_uuid_from_campaign_id_map(mocker):
+    """memorizador.memory_saved deve gravar UUID real quando o mapa conhece o ID externo."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    (
+        fake_supabase.table.return_value.insert.return_value.execute.return_value
+    ).data = [{"id": "mem-2", "campaign_id": VALID_UUID}]
+    log_spy = mocker.spy(graph.log, "info")
+
+    args = graph._resolve_tool_campaign_uuid_args(
+        "save_memory",
+        {
+            "content": "campanha mapeada",
+            "memory_type": "observation",
+            "campaign_uuid": META_NUMERIC_CAMPAIGN_ID,
+        },
+        {META_NUMERIC_CAMPAIGN_ID: VALID_UUID},
+    )
+    result = await save_memory.ainvoke(args)
+
+    inserted = fake_supabase.table.return_value.insert.call_args.args[0]
+    assert inserted["campaign_id"] == VALID_UUID
+    assert result["id"] == "mem-2"
+    assert any(
+        c.args
+        and c.args[0] == "memorizador.memory_saved"
+        and c.kwargs.get("campaign_uuid") == VALID_UUID
+        for c in log_spy.call_args_list
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +453,52 @@ async def test_fetch_google_campaigns_live_logs_start(mocker):
     assert out == [{"campaign_id": "1", "name": "C1"}]
     events = [c.args[0] for c in log_spy.call_args_list if c.args]
     assert "google.list_campaigns.start" in events
+
+
+@pytest.mark.asyncio
+async def test_fetch_meta_campaigns_live_upserts_and_enriches_campaign_uuid(mocker):
+    """Após meta.list_campaigns.done, a tool registra e devolve campaign_uuid."""
+    fake_supabase = mocker.patch.object(graph, "supabase")
+    (
+        fake_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value
+    ).data = {"account_id": "act_123", "token": "token"}
+    campaigns = [{"campaign_id": META_NUMERIC_CAMPAIGN_ID, "name": "Meta A"}]
+    list_campaigns = mocker.patch.object(graph.meta_ads, "list_campaigns", return_value=campaigns)
+    upsert = mocker.patch.object(
+        graph,
+        "upsert_campaigns",
+        return_value={META_NUMERIC_CAMPAIGN_ID: VALID_UUID},
+    )
+
+    result = await graph.fetch_meta_campaigns_live.ainvoke({"ad_account_uuid": VALID_UUID_2})
+
+    list_campaigns.assert_awaited_once_with("act_123", "token")
+    upsert.assert_awaited_once_with(VALID_UUID_2, campaigns, "meta")
+    assert result[0]["campaign_uuid"] == VALID_UUID
+
+
+@pytest.mark.asyncio
+async def test_fetch_google_campaigns_live_upserts_when_account_uuid_is_provided(mocker):
+    """Após google.list_campaigns.done, a tool registra quando recebe ad_account_uuid."""
+    fake_google = mocker.patch.object(graph, "google_ads")
+    campaigns = [{"campaign_id": GOOGLE_CAMPAIGN_ID, "name": "Search Brand"}]
+
+    async def _campaigns(customer_id, creds):
+        return campaigns
+
+    fake_google.get_campaigns.side_effect = _campaigns
+    upsert = mocker.patch.object(
+        graph,
+        "upsert_campaigns",
+        return_value={GOOGLE_CAMPAIGN_ID: VALID_UUID},
+    )
+
+    result = await graph.fetch_google_campaigns_live.ainvoke(
+        {"customer_id": "1224681784", "ad_account_uuid": VALID_UUID_2}
+    )
+
+    upsert.assert_awaited_once_with(VALID_UUID_2, campaigns, "google")
+    assert result[0]["campaign_uuid"] == VALID_UUID
 
 
 @pytest.mark.asyncio

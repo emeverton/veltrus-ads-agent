@@ -23,6 +23,7 @@ from typing_extensions import TypedDict
 
 from agent.config import settings
 from agent.tools import google_ads, meta_ads, normalizer
+from agent.tools.campaign_registry import upsert_campaigns
 from agent.tools.supabase_client import supabase
 
 log = structlog.get_logger(__name__)
@@ -47,6 +48,7 @@ class AgentState(TypedDict):
     # ANALISTA
     campaigns_analyzed: list[dict]
     anomalies: list[dict]
+    campaign_id_map: dict[str, str]  # {campaign_id_externo: uuid_interno}
 
     # ESTRATEGISTA
     decision: dict          # {campaign_uuid, campaign_id, campaign_name, platform, action_type, params, reasoning}
@@ -67,6 +69,7 @@ async def _agent_loop(
     system_prompt: str,
     user_prompt: str,
     max_iterations: int = 6,
+    campaign_id_map: dict[str, str] | None = None,
 ) -> str:
     """Ciclo LLM → tool calls → resultados → LLM até resposta textual final."""
     tools_by_name = {t.name: t for t in tools}
@@ -86,10 +89,19 @@ async def _agent_loop(
 
         for tc in tool_calls:
             fn = tools_by_name.get(tc["name"])
+            args = dict(tc.get("args") or {})
+            if campaign_id_map is not None:
+                args = _resolve_tool_campaign_uuid_args(
+                    tc["name"],
+                    args,
+                    campaign_id_map,
+                )
             if fn is None:
                 result: Any = {"error": f"ferramenta desconhecida: {tc['name']}"}
             else:
-                result = await fn.ainvoke(tc["args"])
+                result = await fn.ainvoke(args)
+            if campaign_id_map is not None:
+                _merge_campaign_id_map(campaign_id_map, result)
             messages.append(
                 ToolMessage(
                     content=json.dumps(result, default=str),
@@ -134,6 +146,112 @@ def _extract_json(text: str) -> dict:
         return json.loads(text[start:end])
     except json.JSONDecodeError:
         return {}
+
+
+def _resolve_campaign_uuid_from_map(
+    candidate: Any,
+    campaign_id_map: dict[str, str] | None,
+    external_id: Any = None,
+) -> str | None:
+    """Resolve UUID interno usando o mapa do ciclo quando o valor recebido é ID externo."""
+    if candidate and not _is_invalid_uuid(candidate):
+        return str(candidate)
+    if not campaign_id_map:
+        return None
+
+    lookup_keys = [
+        str(value).strip()
+        for value in (external_id, candidate)
+        if value is not None and str(value).strip()
+    ]
+    for key in lookup_keys:
+        mapped = campaign_id_map.get(key)
+        if mapped and not _is_invalid_uuid(mapped):
+            return mapped
+    return None
+
+
+def _resolve_tool_campaign_uuid_args(
+    tool_name: str,
+    args: dict[str, Any],
+    campaign_id_map: dict[str, str],
+) -> dict[str, Any]:
+    """Reescreve campaign_uuid de tools quando o LLM passar o ID externo."""
+    if tool_name not in {
+        "fetch_daily_metrics",
+        "search_agent_memory",
+        "save_decision",
+        "save_memory",
+    }:
+        return args
+
+    resolved = _resolve_campaign_uuid_from_map(
+        args.get("campaign_uuid"),
+        campaign_id_map,
+        args.get("campaign_id") or args.get("campaign_external_id"),
+    )
+    if resolved and resolved != args.get("campaign_uuid"):
+        log.info(
+            "campaign_registry.uuid_resolved",
+            tool=tool_name,
+            campaign_id=args.get("campaign_id")
+            or args.get("campaign_external_id")
+            or args.get("campaign_uuid"),
+            campaign_uuid=resolved,
+        )
+        args["campaign_uuid"] = resolved
+    return args
+
+
+def _merge_campaign_id_map(
+    campaign_id_map: dict[str, str],
+    records: Any,
+) -> dict[str, str]:
+    """Mescla {campaign_id externo: uuid interno} a partir de retornos do grafo."""
+    if isinstance(records, dict):
+        records = [records]
+    if not isinstance(records, list):
+        return campaign_id_map
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        external_id = str(record.get("campaign_id") or "").strip()
+        internal_uuid = record.get("campaign_uuid") or record.get("id")
+        if external_id and internal_uuid and not _is_invalid_uuid(internal_uuid):
+            campaign_id_map[external_id] = str(internal_uuid)
+    return campaign_id_map
+
+
+def _apply_campaign_id_map_to_records(
+    records: list[dict],
+    campaign_id_map: dict[str, str],
+) -> list[dict]:
+    """Garante campaign_uuid interno nos registros que carregam campaign_id externo."""
+    enriched: list[dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            enriched.append(record)
+            continue
+        item = dict(record)
+        resolved = _resolve_campaign_uuid_from_map(
+            item.get("campaign_uuid"),
+            campaign_id_map,
+            item.get("campaign_id"),
+        )
+        if resolved:
+            item["campaign_uuid"] = resolved
+        enriched.append(item)
+    return enriched
+
+
+def _attach_campaign_uuids(
+    campaigns: list[dict],
+    campaign_id_map: dict[str, str],
+) -> list[dict]:
+    """Anexa campaign_uuid às campanhas vindas das APIs para o LLM usar imediatamente."""
+    return _apply_campaign_id_map_to_records(campaigns, campaign_id_map)
+
 
 # ===========================================================================
 # FERRAMENTAS — ANALISTA
@@ -213,7 +331,18 @@ async def fetch_meta_campaigns_live(ad_account_uuid: str) -> list[dict]:
         .execute()
     )
     account = row.data or {}
-    return await meta_ads.list_campaigns(account["account_id"], account["token"])
+    campaigns = await meta_ads.list_campaigns(account["account_id"], account["token"])
+    try:
+        campaign_id_map = await upsert_campaigns(ad_account_uuid, campaigns, "meta")
+    except Exception as exc:  # pragma: no cover - fallback defensivo do ciclo
+        log.exception(
+            "campaign_registry.upsert_failed",
+            account_uuid=ad_account_uuid,
+            platform="meta",
+            error=str(exc),
+        )
+        campaign_id_map = {}
+    return _attach_campaign_uuids(campaigns, campaign_id_map)
 
 
 @tool
@@ -264,10 +393,14 @@ def _google_credentials(refresh_token: str = "") -> dict[str, Any]:
 
 
 @tool
-async def fetch_google_campaigns_live(customer_id: str) -> list[dict]:
+async def fetch_google_campaigns_live(
+    customer_id: str,
+    ad_account_uuid: str | None = None,
+) -> list[dict]:
     """Busca campanhas diretamente da Google Ads API (dados em tempo real).
 
     customer_id: ID da conta Google Ads (sem hífens). Usa as credenciais OAuth do .env.
+    ad_account_uuid: UUID interno opcional de ad_accounts para registrar campanhas.
     Retorna campanhas não-removidas com campaign_id, name, status, campaign_budget_id e
     daily_budget_usd. Preferir sobre fetch_account_campaigns quando platform == 'google'.
     """
@@ -278,7 +411,22 @@ async def fetch_google_campaigns_live(customer_id: str) -> list[dict]:
         log.error("google.list_campaigns.failed", customer_id=customer_id, error=str(exc))
         return []
     log.info("google.list_campaigns.done", customer_id=customer_id, total=len(campaigns))
-    return campaigns
+
+    account_uuid = ad_account_uuid if ad_account_uuid and not _is_invalid_uuid(ad_account_uuid) else None
+    if not account_uuid:
+        return campaigns
+
+    try:
+        campaign_id_map = await upsert_campaigns(account_uuid, campaigns, "google")
+    except Exception as exc:  # pragma: no cover - fallback defensivo do ciclo
+        log.exception(
+            "campaign_registry.upsert_failed",
+            account_uuid=account_uuid,
+            platform="google",
+            error=str(exc),
+        )
+        campaign_id_map = {}
+    return _attach_campaign_uuids(campaigns, campaign_id_map)
 
 # ===========================================================================
 # FERRAMENTAS — ESTRATEGISTA
@@ -568,7 +716,7 @@ Para platform == 'meta':
   4. Se spend_usd == 0, use fetch_daily_metrics(campaign_uuid, platform="meta")
 
 Para platform == 'google':
-  1. fetch_google_campaigns_live(customer_id) → campanhas em tempo real da Google Ads API
+  1. fetch_google_campaigns_live(customer_id, ad_account_uuid) → campanhas em tempo real da Google Ads API
      (customer_id = ID externo da conta). Loga google.list_campaigns.start.
   2. Se lista vazia e houver UUID interno válido da conta, use fetch_account_campaigns → campanhas do Supabase.
      Se o UUID interno estiver "não disponível", NÃO chame fetch_account_campaigns.
@@ -628,6 +776,7 @@ def _account_internal_uuid(account: dict) -> str | None:
 async def analista_node(state: AgentState) -> dict:
     account = state["account"]
     log.info("analista.start", account_id=account.get("account_id"), platform=account.get("platform"))
+    campaign_id_map = dict(state.get("campaign_id_map") or {})
 
     date_end   = datetime.utcnow().date()
     date_start = date_end - timedelta(days=7)
@@ -648,7 +797,10 @@ Analise as campanhas desta conta:
 - ID externo da conta: {account["account_id"]}
 - Cliente: {state["client"].get("name", "N/A")} ({state["client"].get("vertical", "")})
 - Período de análise: {date_start} até {date_end}
+- Mapa atual campaign_id externo → UUID interno: {json.dumps(campaign_id_map, default=str)}
 
+Se a plataforma for google e houver UUID interno da conta, chame fetch_google_campaigns_live
+com customer_id e ad_account_uuid para registrar as campanhas no Supabase.
 Siga a estratégia de coleta definida no sistema e retorne o JSON.
 """.strip()
 
@@ -662,18 +814,30 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
         ],
         system_prompt=_ANALISTA_SYSTEM,
         user_prompt=user_prompt,
+        campaign_id_map=campaign_id_map,
     )
 
     parsed = _extract_json(raw)
     campaigns_analyzed: list[dict] = parsed.get("campaigns_analyzed", [])
     anomalies: list[dict] = parsed.get("anomalies", [])
+    _merge_campaign_id_map(campaign_id_map, campaigns_analyzed)
+    _merge_campaign_id_map(campaign_id_map, anomalies)
+    campaigns_analyzed = _apply_campaign_id_map_to_records(
+        campaigns_analyzed,
+        campaign_id_map,
+    )
+    anomalies = _apply_campaign_id_map_to_records(anomalies, campaign_id_map)
 
     log.info(
         "analista.done",
         campaigns_analyzed=len(campaigns_analyzed),
         anomalies=len(anomalies),
     )
-    return {"campaigns_analyzed": campaigns_analyzed, "anomalies": anomalies}
+    return {
+        "campaigns_analyzed": campaigns_analyzed,
+        "anomalies": anomalies,
+        "campaign_id_map": campaign_id_map,
+    }
 
 # ===========================================================================
 # NÓ 2: ESTRATEGISTA
@@ -713,13 +877,17 @@ Retorne EXCLUSIVAMENTE um JSON:
 
 
 async def estrategista_node(state: AgentState) -> dict:
-    anomalies = state["anomalies"]
+    campaign_id_map = dict(state.get("campaign_id_map") or {})
+    anomalies = _apply_campaign_id_map_to_records(state["anomalies"], campaign_id_map)
     client = state["client"]
     log.info("estrategista.start", anomalies_count=len(anomalies))
 
     user_prompt = f"""
 Anomalias detectadas pelo ANALISTA:
 {json.dumps(anomalies, indent=2, default=str)}
+
+Mapa campaign_id externo → UUID interno:
+{json.dumps(campaign_id_map, indent=2, default=str)}
 
 Contexto do cliente:
 - Nome: {client.get("name")}
@@ -738,11 +906,20 @@ Retorne o JSON conforme especificado.
         tools=[search_agent_memory],
         system_prompt=_ESTRATEGISTA_SYSTEM,
         user_prompt=user_prompt,
+        campaign_id_map=campaign_id_map,
     )
 
     parsed = _extract_json(raw)
     if not parsed.get("action_type"):
         parsed = {"action_type": "monitor_only", "reasoning": raw, "campaign_uuid": "", "params": {}}
+
+    resolved = _resolve_campaign_uuid_from_map(
+        parsed.get("campaign_uuid"),
+        campaign_id_map,
+        parsed.get("campaign_id"),
+    )
+    if resolved:
+        parsed["campaign_uuid"] = resolved
 
     if _is_invalid_uuid(parsed.get("campaign_uuid")):
         recovered = _recover_campaign_uuid(parsed, anomalies)
@@ -763,7 +940,14 @@ Retorne o JSON conforme especificado.
             parsed["action_type"] = "monitor_only"
 
     log.info("estrategista.done", action_type=parsed.get("action_type"))
-    return {"decision": parsed, "memory_context": []}
+    _merge_campaign_id_map(campaign_id_map, anomalies)
+    _merge_campaign_id_map(campaign_id_map, parsed)
+    return {
+        "decision": parsed,
+        "memory_context": [],
+        "anomalies": anomalies,
+        "campaign_id_map": campaign_id_map,
+    }
 
 
 def _recover_campaign_uuid(decision: dict, anomalies: list[dict]) -> str | None:
@@ -811,7 +995,15 @@ Retorne EXCLUSIVAMENTE um JSON:
 
 
 async def revisor_node(state: AgentState) -> dict:
-    decision = state["decision"]
+    campaign_id_map = dict(state.get("campaign_id_map") or {})
+    decision = dict(state["decision"])
+    resolved = _resolve_campaign_uuid_from_map(
+        decision.get("campaign_uuid"),
+        campaign_id_map,
+        decision.get("campaign_id"),
+    )
+    if resolved:
+        decision["campaign_uuid"] = resolved
     log.info("revisor.start", action_type=decision.get("action_type"))
 
     # Enriquece o contexto com spend da campanha-alvo
@@ -882,7 +1074,15 @@ Retorne EXCLUSIVAMENTE um JSON:
 
 
 async def executor_node(state: AgentState) -> dict:
-    decision = state["decision"]
+    campaign_id_map = dict(state.get("campaign_id_map") or {})
+    decision = dict(state["decision"])
+    resolved = _resolve_campaign_uuid_from_map(
+        decision.get("campaign_uuid"),
+        campaign_id_map,
+        decision.get("campaign_id"),
+    )
+    if resolved:
+        decision["campaign_uuid"] = resolved
     risk_level = state["risk_level"]
     account = state["account"]
 
@@ -912,6 +1112,7 @@ Siga as regras de execução e retorne o JSON de resultado.
         tools=[save_decision, run_meta_action, run_google_action, notify_human],
         system_prompt=_EXECUTOR_SYSTEM,
         user_prompt=user_prompt,
+        campaign_id_map=campaign_id_map,
     )
 
     result = _extract_json(raw)
@@ -923,7 +1124,7 @@ Siga as regras de execução e retorne o JSON de resultado.
         executed=result.get("executed"),
         risk_level=risk_level,
     )
-    return {"execution_result": result}
+    return {"decision": decision, "execution_result": result}
 
 # ===========================================================================
 # NÓ 5: MEMORIZADOR
@@ -953,19 +1154,36 @@ Use save_memory para cada memória. Ao terminar, retorne uma lista JSON:
 
 async def memorizador_node(state: AgentState) -> dict:
     account = state["account"]
+    campaign_id_map = dict(state.get("campaign_id_map") or {})
+    campaigns_analyzed = _apply_campaign_id_map_to_records(
+        state.get("campaigns_analyzed", []),
+        campaign_id_map,
+    )
+    anomalies = _apply_campaign_id_map_to_records(
+        state.get("anomalies", []),
+        campaign_id_map,
+    )
+    decision = dict(state.get("decision", {}))
+    resolved = _resolve_campaign_uuid_from_map(
+        decision.get("campaign_uuid"),
+        campaign_id_map,
+        decision.get("campaign_id"),
+    )
+    if resolved:
+        decision["campaign_uuid"] = resolved
     log.info("memorizador.start", account_id=account.get("account_id"))
 
     user_prompt = f"""
 Resumo do ciclo para a conta {account["account_id"]} ({account["platform"]}):
 
-Campanhas analisadas ({len(state.get("campaigns_analyzed", []))} total):
-{json.dumps(state.get("campaigns_analyzed", []), indent=2, default=str)}
+Campanhas analisadas ({len(campaigns_analyzed)} total):
+{json.dumps(campaigns_analyzed, indent=2, default=str)}
 
 Anomalias detectadas:
-{json.dumps(state.get("anomalies", []), indent=2, default=str)}
+{json.dumps(anomalies, indent=2, default=str)}
 
 Decisão do ESTRATEGISTA:
-{json.dumps(state.get("decision", {}), indent=2, default=str)}
+{json.dumps(decision, indent=2, default=str)}
 
 Nível de risco: {state.get("risk_level", "N/A")}
 Risk reasoning: {state.get("risk_reasoning", "")}
@@ -980,10 +1198,16 @@ Salve as memórias relevantes e retorne o JSON de confirmação.
         tools=[save_memory],
         system_prompt=_MEMORIZADOR_SYSTEM,
         user_prompt=user_prompt,
+        campaign_id_map=campaign_id_map,
     )
 
     log.info("memorizador.done", account_id=account.get("account_id"))
-    return {}
+    return {
+        "campaigns_analyzed": campaigns_analyzed,
+        "anomalies": anomalies,
+        "decision": decision,
+        "campaign_id_map": campaign_id_map,
+    }
 
 # ===========================================================================
 # Roteamento condicional após ANALISTA
