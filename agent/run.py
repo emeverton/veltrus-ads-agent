@@ -38,6 +38,7 @@ async def run_account(account: dict, client: dict) -> None:
         "risk_level": "",
         "risk_reasoning": "",
         "execution_result": {},
+        "campaign_id_map": {},
     }
 
     try:

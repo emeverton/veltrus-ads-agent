@@ -39,6 +39,7 @@ def _initial_state(account: dict, client: dict) -> AgentState:
         "risk_level": "",
         "risk_reasoning": "",
         "execution_result": {},
+        "campaign_id_map": {},
     }
 
 
