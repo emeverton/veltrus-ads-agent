@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     # Read-only: quando true, o agente apenas loga ações Google sem executá-las na API.
     google_ads_read_only: bool = True
 
+    # BigQuery Analytics Layer
+    google_cloud_project: str = "veltrus-ads-agent"
+    gcp_project_id: str = ""
+    bigquery_enabled: bool = False
+    bigquery_dataset: str = "veltrus_analytics"
+    bigquery_location: str = "US"
+    bigquery_campaign_daily_table: str = "campaign_daily_performance"
+    bigquery_credentials_json: str = ""  # JSON inline da SA (alternativa a GOOGLE_APPLICATION_CREDENTIALS)
+
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000
@@ -52,12 +61,5 @@ class Settings(BaseSettings):
     # Notificações humanas — n8n / WhatsApp
     n8n_webhook_url: str = ""          # URL do webhook n8n (POST com payload de decisão)
     notify_phone_number: str = ""      # Número WhatsApp no formato E.164 (ex: 5511999998888)
-
-    # Google Cloud / BigQuery Analytics Layer
-    gcp_project_id: str = ""           # ex: veltrus-ads-agent
-    bigquery_dataset: str = "veltrus_analytics"
-    bigquery_location: str = "US"
-    bigquery_credentials_json: str = ""  # JSON inline da SA (alternativa a GOOGLE_APPLICATION_CREDENTIALS)
-
 
 settings = Settings()  # type: ignore[call-arg]

@@ -16,7 +16,7 @@ _client: Any | None = None
 
 def is_configured() -> bool:
     """Retorna True se o projeto GCP e dataset BigQuery estão configurados."""
-    return bool(settings.gcp_project_id and settings.bigquery_dataset)
+    return bool((settings.gcp_project_id or settings.google_cloud_project) and settings.bigquery_dataset)
 
 
 def _get_client() -> Any:
@@ -24,21 +24,25 @@ def _get_client() -> Any:
     if _client is not None:
         return _client
     if not is_configured():
-        raise RuntimeError("BigQuery não configurado — defina GCP_PROJECT_ID e BIGQUERY_DATASET")
+        raise RuntimeError("BigQuery nao configurado - defina GOOGLE_CLOUD_PROJECT/GCP_PROJECT_ID e BIGQUERY_DATASET")
     from google.cloud import bigquery
     from google.oauth2 import service_account
 
     if settings.bigquery_credentials_json:
         info = json.loads(settings.bigquery_credentials_json)
         credentials = service_account.Credentials.from_service_account_info(info)
-        _client = bigquery.Client(project=settings.gcp_project_id, credentials=credentials)
+        _client = bigquery.Client(
+            project=settings.gcp_project_id or settings.google_cloud_project,
+            credentials=credentials,
+        )
     else:
-        _client = bigquery.Client(project=settings.gcp_project_id)
+        _client = bigquery.Client(project=settings.gcp_project_id or settings.google_cloud_project)
     return _client
 
 
 def table_ref(table_name: str) -> str:
-    return f"`{settings.gcp_project_id}.{settings.bigquery_dataset}.{table_name}`"
+    project_id = settings.gcp_project_id or settings.google_cloud_project
+    return f"`{project_id}.{settings.bigquery_dataset}.{table_name}`"
 
 
 def ensure_dataset() -> None:
@@ -46,7 +50,7 @@ def ensure_dataset() -> None:
     from google.cloud import bigquery
 
     client = _get_client()
-    dataset_id = f"{settings.gcp_project_id}.{settings.bigquery_dataset}"
+    dataset_id = f"{settings.gcp_project_id or settings.google_cloud_project}.{settings.bigquery_dataset}"
     try:
         client.get_dataset(dataset_id)
         log.info("bigquery.dataset.exists", dataset=dataset_id)
@@ -82,7 +86,8 @@ def insert_rows(table_name: str, rows: list[dict[str, Any]]) -> int:
     if not rows:
         return 0
     client = _get_client()
-    table_id = f"{settings.gcp_project_id}.{settings.bigquery_dataset}.{table_name}"
+    project_id = settings.gcp_project_id or settings.google_cloud_project
+    table_id = f"{project_id}.{settings.bigquery_dataset}.{table_name}"
     now = datetime.now(timezone.utc).isoformat()
     for row in rows:
         row.setdefault("synced_at", now)

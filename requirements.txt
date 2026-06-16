@@ -25,9 +25,7 @@ facebook-business>=21.0.0
 google-ads>=25.0.0
 google-auth>=2.36.0
 google-auth-oauthlib>=1.2.0
-
-# BigQuery Analytics Layer
-google-cloud-bigquery>=3.27.0
+google-cloud-bigquery>=3.42.0
 
 # Validação e configuração
 pydantic>=2.10.0

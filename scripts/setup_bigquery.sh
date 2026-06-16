@@ -4,7 +4,7 @@
 # =============================================================================
 set -euo pipefail
 
-PROJECT_ID="${GCP_PROJECT_ID:-veltrus-ads-agent}"
+PROJECT_ID="${GCP_PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-veltrus-ads-agent}}"
 DATASET="${BIGQUERY_DATASET:-veltrus_analytics}"
 LOCATION="${BIGQUERY_LOCATION:-US}"
 SCHEMA_FILE="$(dirname "$0")/../analytics/bigquery/schema.sql"

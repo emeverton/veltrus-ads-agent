@@ -38,6 +38,37 @@ CREATE TABLE IF NOT EXISTS `veltrus_analytics.daily_metrics` (
   synced_at TIMESTAMP NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS `veltrus_analytics.campaign_daily_performance` (
+  analytics_key STRING NOT NULL,
+  synced_at TIMESTAMP,
+  client_uuid STRING,
+  client_name STRING,
+  vertical STRING,
+  ad_account_uuid STRING,
+  account_external_id STRING,
+  platform STRING,
+  campaign_uuid STRING,
+  external_campaign_id STRING,
+  campaign_name STRING,
+  status STRING,
+  objective STRING,
+  date DATE,
+  spend_usd FLOAT64,
+  impressions INT64,
+  clicks INT64,
+  conversions FLOAT64,
+  cpa FLOAT64,
+  roas_platform FLOAT64,
+  ctr FLOAT64,
+  attribution_window STRING,
+  confidence_score FLOAT64,
+  revenue_closed FLOAT64,
+  leads_total INT64,
+  deals_closed INT64,
+  roas_real FLOAT64,
+  metric_created_at TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS `veltrus_analytics.leads` (
   id STRING NOT NULL,
   client_id STRING,
@@ -89,7 +120,7 @@ SELECT
   c.campaign_id AS external_campaign_id,
   c.name AS campaign_name,
   c.platform,
-  COALESCE(SUM(d.revenue_amount), 0) AS revenue_closed,
+  COALESCE(SUM(dl.revenue_amount), 0) AS revenue_closed,
   COUNT(DISTINCT l.id) AS leads_total,
   COUNT(DISTINCT dl.id) AS deals_closed
 FROM `veltrus_analytics.campaigns` c
