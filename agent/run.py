@@ -33,6 +33,7 @@ async def run_account(account: dict, client: dict) -> None:
         "client": client,
         "campaigns_analyzed": [],
         "anomalies": [],
+        "campaign_id_map": {},
         "decision": {},
         "memory_context": [],
         "risk_level": "",

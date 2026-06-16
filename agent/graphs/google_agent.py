@@ -34,6 +34,7 @@ def _initial_state(account: dict, client: dict) -> AgentState:
         "client": client,
         "campaigns_analyzed": [],
         "anomalies": [],
+        "campaign_id_map": {},
         "decision": {},
         "memory_context": [],
         "risk_level": "",
