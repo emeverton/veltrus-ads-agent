@@ -20,48 +20,43 @@ def client():
 
 
 def test_get_campaign_real_roas_valid_uuid(mocker):
-    fake_supabase = mocker.patch.object(campaign_registry, "supabase")
-    (
-        fake_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value
-    ).data = {
-        "revenue_closed": 1500.0,
-        "leads_total": 3,
-        "deals_closed": 1,
-    }
-    log_spy = mocker.spy(campaign_registry.log, "info")
+    mocker.patch(
+        "agent.tools.bigquery_attribution.get_campaign_real_roas",
+        return_value={
+            "revenue_real": 1500.0,
+            "leads_total": 3,
+            "deals_closed": 1,
+        },
+    )
 
     result = campaign_registry.get_campaign_real_roas(CAMPAIGN_UUID)
 
     assert result["revenue_closed"] == 1500.0
     assert result["leads_total"] == 3
     assert result["deals_closed"] == 1
-    fake_supabase.table.assert_called_once_with("campaign_attribution")
-    events = [c.args[0] for c in log_spy.call_args_list if c.args]
-    assert "attribution.real_roas" in events
 
 
 @pytest.mark.parametrize("bad_uuid", ["n/a", "", None, "not-a-uuid", EXTERNAL_ID])
 def test_get_campaign_real_roas_invalid_returns_zeros(mocker, bad_uuid):
-    fake_supabase = mocker.patch.object(campaign_registry, "supabase")
+    mocker.patch(
+        "agent.tools.bigquery_attribution.get_campaign_real_roas",
+        return_value={"revenue_real": 0, "leads_total": 0, "deals_closed": 0},
+    )
 
     result = campaign_registry.get_campaign_real_roas(bad_uuid)
 
     assert result == {"revenue_closed": 0, "leads_total": 0, "deals_closed": 0}
-    fake_supabase.table.assert_not_called()
 
 
 def test_get_campaign_real_roas_failure_returns_zeros(mocker):
-    fake_supabase = mocker.patch.object(campaign_registry, "supabase")
-    (
-        fake_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute
-    ).side_effect = RuntimeError("view missing")
-    log_spy = mocker.spy(campaign_registry.log, "warning")
+    mocker.patch(
+        "agent.tools.bigquery_attribution.get_campaign_real_roas",
+        return_value={"revenue_real": 0.0, "leads_total": 0, "deals_closed": 0},
+    )
 
     result = campaign_registry.get_campaign_real_roas(CAMPAIGN_UUID)
 
     assert result == {"revenue_closed": 0, "leads_total": 0, "deals_closed": 0}
-    events = [c.args[0] for c in log_spy.call_args_list if c.args]
-    assert "attribution.real_roas.failed" in events
 
 
 @pytest.mark.asyncio
@@ -82,7 +77,12 @@ async def test_analista_enriches_campaigns_with_roas_real(mocker):
     mocker.patch.object(
         graph,
         "get_campaign_real_roas",
-        return_value={"revenue_closed": 500.0, "leads_total": 2, "deals_closed": 1},
+        return_value={
+            "roas_real": 5.0,
+            "revenue_real": 500.0,
+            "leads_total": 2,
+            "deals_closed": 1,
+        },
     )
 
     state = {

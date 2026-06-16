@@ -25,10 +25,13 @@ from agent.config import settings
 from agent.tools import google_ads, meta_ads, normalizer
 from agent.tools.campaign_registry import (
     get_campaign_id_map,
-    get_campaign_real_roas,
     merge_campaign_id_map,
     register_campaigns_safe,
     set_campaign_id_map,
+)
+from agent.tools.bigquery_attribution import (
+    get_campaign_real_roas,
+    sync_campaign_spend_to_bq,
 )
 from agent.tools.supabase_client import supabase
 
@@ -816,20 +819,25 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
     )
 
     for campaign in campaigns_analyzed:
-        ext_id = campaign.get("campaign_id") or campaign.get("id")
-        uuid_key = campaign_id_map.get(str(ext_id)) or campaign.get("campaign_uuid")
+        ext_id = str(campaign.get("campaign_id") or campaign.get("id") or "")
+        uuid_key = campaign.get("campaign_uuid") or campaign_id_map.get(ext_id)
+        campaign["_uuid"] = uuid_key
         if uuid_key and not _is_invalid_uuid(uuid_key):
-            real = get_campaign_real_roas(uuid_key)
-            campaign["revenue_real"] = real.get("revenue_closed", 0)
-            campaign["leads_total"] = real.get("leads_total", 0)
-            campaign["deals_closed"] = real.get("deals_closed", 0)
-            spend = campaign.get("spend") or campaign.get("last_spend_usd")
-            revenue_closed = real.get("revenue_closed", 0) or 0
-            campaign["roas_real"] = (
-                round(revenue_closed / spend, 2)
-                if spend and revenue_closed > 0
-                else None
-            )
+            attr = get_campaign_real_roas(uuid_key)
+            campaign["roas_real"] = attr.get("roas_real")
+            campaign["revenue_real"] = attr.get("revenue_real", 0)
+            campaign["leads_total"] = attr.get("leads_total", 0)
+            campaign["deals_closed"] = attr.get("deals_closed", 0)
+            if campaign["roas_real"] is None:
+                spend = campaign.get("spend") or campaign.get("last_spend_usd")
+                revenue = campaign.get("revenue_real", 0) or 0
+                campaign["roas_real"] = (
+                    round(revenue / spend, 2)
+                    if spend and revenue > 0
+                    else None
+                )
+
+    sync_campaign_spend_to_bq(campaigns_analyzed)
 
     log.info(
         "analista.done",

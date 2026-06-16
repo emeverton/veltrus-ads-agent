@@ -168,27 +168,14 @@ def _is_invalid_uuid(value: Any) -> bool:
 def get_campaign_real_roas(campaign_uuid: str) -> dict:
     """
     Busca ROAS real baseado em deals fechados no CRM.
-    Retorna dict com revenue_closed, leads_total, deals_closed.
-    Se não houver dados, retorna zeros (não quebra o ciclo).
+    Delega para BigQuery com fallback Supabase; retorna chaves legadas
+    (revenue_closed) para compatibilidade com callers existentes.
     """
-    if not campaign_uuid or _is_invalid_uuid(campaign_uuid):
-        return {"revenue_closed": 0, "leads_total": 0, "deals_closed": 0}
-    try:
-        result = (
-            supabase.table("campaign_attribution")
-            .select("revenue_closed, leads_total, deals_closed")
-            .eq("campaign_id", campaign_uuid)
-            .single()
-            .execute()
-        )
-        data = result.data or {}
-        log.info(
-            "attribution.real_roas",
-            campaign_uuid=campaign_uuid,
-            revenue=data.get("revenue_closed", 0),
-            deals=data.get("deals_closed", 0),
-        )
-        return data
-    except Exception as exc:
-        log.warning("attribution.real_roas.failed", error=str(exc))
-        return {"revenue_closed": 0, "leads_total": 0, "deals_closed": 0}
+    from agent.tools.bigquery_attribution import get_campaign_real_roas as _bq_roas
+
+    data = _bq_roas(campaign_uuid)
+    return {
+        "revenue_closed": data.get("revenue_real", 0),
+        "leads_total": data.get("leads_total", 0),
+        "deals_closed": data.get("deals_closed", 0),
+    }

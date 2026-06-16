@@ -28,15 +28,13 @@ def _get_client() -> Any:
     from google.cloud import bigquery
     from google.oauth2 import service_account
 
+    project = settings.gcp_project_id or settings.google_cloud_project
     if settings.bigquery_credentials_json:
         info = json.loads(settings.bigquery_credentials_json)
         credentials = service_account.Credentials.from_service_account_info(info)
-        _client = bigquery.Client(
-            project=settings.gcp_project_id or settings.google_cloud_project,
-            credentials=credentials,
-        )
+        _client = bigquery.Client(project=project, credentials=credentials)
     else:
-        _client = bigquery.Client(project=settings.gcp_project_id or settings.google_cloud_project)
+        _client = bigquery.Client(project=project)
     return _client
 
 

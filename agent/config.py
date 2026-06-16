@@ -62,4 +62,5 @@ class Settings(BaseSettings):
     n8n_webhook_url: str = ""          # URL do webhook n8n (POST com payload de decisão)
     notify_phone_number: str = ""      # Número WhatsApp no formato E.164 (ex: 5511999998888)
 
+
 settings = Settings()  # type: ignore[call-arg]
