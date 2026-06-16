@@ -1,6 +1,7 @@
 """Registro automático de campanhas da API no Supabase."""
 from __future__ import annotations
 
+import uuid
 from contextvars import ContextVar
 from datetime import datetime
 from typing import Any
@@ -151,3 +152,43 @@ async def register_campaigns_safe(
             error=str(exc),
         )
         return get_campaign_id_map()
+
+
+def _is_invalid_uuid(value: Any) -> bool:
+    """Retorna True para qualquer valor que não seja UUID v4 válido."""
+    if not value:
+        return True
+    try:
+        parsed = uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return True
+    return parsed.version != 4
+
+
+def get_campaign_real_roas(campaign_uuid: str) -> dict:
+    """
+    Busca ROAS real baseado em deals fechados no CRM.
+    Retorna dict com revenue_closed, leads_total, deals_closed.
+    Se não houver dados, retorna zeros (não quebra o ciclo).
+    """
+    if not campaign_uuid or _is_invalid_uuid(campaign_uuid):
+        return {"revenue_closed": 0, "leads_total": 0, "deals_closed": 0}
+    try:
+        result = (
+            supabase.table("campaign_attribution")
+            .select("revenue_closed, leads_total, deals_closed")
+            .eq("campaign_id", campaign_uuid)
+            .single()
+            .execute()
+        )
+        data = result.data or {}
+        log.info(
+            "attribution.real_roas",
+            campaign_uuid=campaign_uuid,
+            revenue=data.get("revenue_closed", 0),
+            deals=data.get("deals_closed", 0),
+        )
+        return data
+    except Exception as exc:
+        log.warning("attribution.real_roas.failed", error=str(exc))
+        return {"revenue_closed": 0, "leads_total": 0, "deals_closed": 0}

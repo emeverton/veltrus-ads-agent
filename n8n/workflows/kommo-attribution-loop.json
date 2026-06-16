@@ -1,0 +1,196 @@
+{
+  "name": "Kommo → Attribution Loop",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "kommo-deal-won",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-kommo-deal-won",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "kommo-deal-won"
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $env.VELTRUS_API_HOST || 'veltrus-api.ehos.com.br' }}/leads?crm_deal_id={{ $json.body.deal_id || $json.deal_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.VELTRUS_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "http-get-lead",
+      "name": "GET Lead by CRM Deal ID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "lead-found",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-lead-found",
+      "name": "Lead Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [720, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://{{ $env.SUPABASE_HOST || 'supabase.ehos.com.br' }}/rest/v1/deals",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=minimal"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": \"{{ $('GET Lead by CRM Deal ID').item.json.id }}\",\n  \"campaign_id\": \"{{ $('GET Lead by CRM Deal ID').item.json.campaign_id }}\",\n  \"client_id\": \"{{ $('GET Lead by CRM Deal ID').item.json.client_id }}\",\n  \"crm_deal_id\": \"{{ $('Webhook').item.json.body.deal_id || $('Webhook').item.json.deal_id }}\",\n  \"revenue_amount\": {{ $('Webhook').item.json.body.deal_value || $('Webhook').item.json.deal_value || 0 }},\n  \"closed_at\": \"{{ $now.toISO() }}\"\n}",
+        "options": {}
+      },
+      "id": "http-insert-deal",
+      "name": "INSERT Deal (Supabase)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 220]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"ok\" }",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-ok",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"ok\", \"note\": \"lead not found\" }",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-ok-no-lead",
+      "name": "Respond (No Lead)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [960, 400]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "GET Lead by CRM Deal ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET Lead by CRM Deal ID": {
+      "main": [
+        [
+          {
+            "node": "Lead Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Found?": {
+      "main": [
+        [
+          {
+            "node": "INSERT Deal (Supabase)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond (No Lead)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "INSERT Deal (Supabase)": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+  ],
+  "triggerCount": 1,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  }
+}
