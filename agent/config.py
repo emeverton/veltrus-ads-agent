@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # Read-only: quando true, o agente apenas loga ações Google sem executá-las na API.
     google_ads_read_only: bool = True
 
+    # BigQuery Attribution Analytics
+    google_cloud_project: str = "veltrus-ads-agent"
+    bigquery_dataset: str = "veltrus_attribution"
+    bigquery_location: str = "southamerica-east1"
+
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000
