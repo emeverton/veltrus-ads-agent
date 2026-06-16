@@ -53,5 +53,11 @@ class Settings(BaseSettings):
     n8n_webhook_url: str = ""          # URL do webhook n8n (POST com payload de decisão)
     notify_phone_number: str = ""      # Número WhatsApp no formato E.164 (ex: 5511999998888)
 
+    # Google Cloud / BigQuery Analytics Layer
+    gcp_project_id: str = ""           # ex: veltrus-ads-agent
+    bigquery_dataset: str = "veltrus_analytics"
+    bigquery_location: str = "US"
+    bigquery_credentials_json: str = ""  # JSON inline da SA (alternativa a GOOGLE_APPLICATION_CREDENTIALS)
+
 
 settings = Settings()  # type: ignore[call-arg]
