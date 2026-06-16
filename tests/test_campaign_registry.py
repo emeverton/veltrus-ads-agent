@@ -140,6 +140,27 @@ async def test_register_campaigns_safe_does_not_raise_on_error(mocker):
     assert "campaign_registry.upsert_failed" in events
 
 
+def test_get_campaign_real_roas_returns_zeros_for_invalid_uuid(mocker):
+    fake_supabase = mocker.patch.object(campaign_registry, "supabase")
+
+    result = campaign_registry.get_campaign_real_roas("n/a")
+
+    assert result == {"revenue_closed": 0, "leads_total": 0, "deals_closed": 0}
+    fake_supabase.table.assert_not_called()
+
+
+def test_get_campaign_real_roas_returns_view_data(mocker):
+    fake_supabase = mocker.patch.object(campaign_registry, "supabase")
+    (
+        fake_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value
+    ).data = {"revenue_closed": 250.0, "leads_total": 3, "deals_closed": 1}
+
+    result = campaign_registry.get_campaign_real_roas(CAMPAIGN_UUID)
+
+    fake_supabase.table.assert_called_once_with("campaign_attribution")
+    assert result == {"revenue_closed": 250.0, "leads_total": 3, "deals_closed": 1}
+
+
 def test_resolve_campaign_uuid_from_map():
     campaign_registry.set_campaign_id_map({EXTERNAL_ID: CAMPAIGN_UUID})
 
@@ -222,3 +243,22 @@ async def test_fetch_meta_campaigns_live_registers_campaigns(mocker):
 
     register.assert_awaited_once()
     assert out[0]["campaign_uuid"] == CAMPAIGN_UUID
+
+
+def test_enrich_items_with_real_attribution_adds_roas_real(mocker):
+    mocker.patch.object(
+        graph,
+        "get_campaign_real_roas",
+        return_value={"revenue_closed": 320.0, "leads_total": 4, "deals_closed": 2},
+    )
+
+    result = graph._enrich_items_with_real_attribution(
+        [{"campaign_id": EXTERNAL_ID, "last_spend_usd": 80.0}],
+        {EXTERNAL_ID: CAMPAIGN_UUID},
+        {},
+    )
+
+    assert result[0]["revenue_real"] == 320.0
+    assert result[0]["leads_total"] == 4
+    assert result[0]["deals_closed"] == 2
+    assert result[0]["roas_real"] == 4.0
