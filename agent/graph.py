@@ -23,6 +23,7 @@ from typing_extensions import TypedDict
 
 from agent.config import settings
 from agent.tools import google_ads, meta_ads, normalizer
+from agent.tools.campaign_registry import upsert_campaigns
 from agent.tools.supabase_client import supabase
 
 log = structlog.get_logger(__name__)
@@ -47,6 +48,7 @@ class AgentState(TypedDict):
     # ANALISTA
     campaigns_analyzed: list[dict]
     anomalies: list[dict]
+    campaign_id_map: dict   # {campaign_id_externo: uuid_interno_supabase}
 
     # ESTRATEGISTA
     decision: dict          # {campaign_uuid, campaign_id, campaign_name, platform, action_type, params, reasoning}
@@ -627,12 +629,61 @@ def _account_internal_uuid(account: dict) -> str | None:
 
 async def analista_node(state: AgentState) -> dict:
     account = state["account"]
-    log.info("analista.start", account_id=account.get("account_id"), platform=account.get("platform"))
+    platform = account.get("platform", "")
+    log.info("analista.start", account_id=account.get("account_id"), platform=platform)
 
     date_end   = datetime.utcnow().date()
     date_start = date_end - timedelta(days=7)
-
     internal_uuid = _account_internal_uuid(account)
+
+    # ── Pré-processamento determinístico: fetch + upsert antes do LLM ────────
+    # Busca campanhas diretamente da API, registra no Supabase e monta o mapa
+    # {external_id: uuid_interno} para que o LLM use UUIDs reais imediatamente.
+    prefetched: list[dict] = []
+    campaign_id_map: dict[str, str] = {}
+
+    if platform == "meta" and account.get("token") and account.get("account_id"):
+        try:
+            prefetched = await meta_ads.list_campaigns(
+                account["account_id"], account["token"]
+            )
+            log.info("meta.list_campaigns.done", total=len(prefetched))
+        except Exception as exc:
+            log.warning("meta.list_campaigns.prefetch_failed", error=str(exc))
+    elif platform == "google" and account.get("account_id"):
+        try:
+            creds = _google_credentials(account.get("token", ""))
+            prefetched = await google_ads.get_campaigns(account["account_id"], creds)
+            log.info("google.list_campaigns.done", total=len(prefetched))
+        except Exception as exc:
+            log.warning("google.list_campaigns.prefetch_failed", error=str(exc))
+
+    if prefetched and internal_uuid:
+        try:
+            campaign_id_map = await upsert_campaigns(internal_uuid, prefetched, platform)
+        except Exception as exc:
+            log.warning("campaign_registry.upsert_failed", error=str(exc))
+
+    # ── Constrói bloco de campanhas com UUIDs para o prompt do LLM ───────────
+    if campaign_id_map:
+        camp_lines = []
+        for c in prefetched:
+            ext_id = str(c.get("campaign_id") or "")
+            int_uuid = campaign_id_map.get(ext_id, "")
+            camp_lines.append(
+                f"  - campaign_uuid={int_uuid} campaign_id={ext_id}"
+                f" name=\"{c.get('name', '')}\" status={c.get('status', '')}"
+            )
+        campaigns_block = (
+            "\nCampanhas pré-carregadas (UUID interno já registrado no Supabase):\n"
+            + "\n".join(camp_lines)
+            + "\nUSE estes campaign_uuid diretamente no fetch_daily_metrics. "
+            "NÃO chame fetch_meta_campaigns_live nem fetch_google_campaigns_live "
+            "— os dados de campanhas já estão disponíveis acima.\n"
+        )
+    else:
+        campaigns_block = ""
+
     if internal_uuid:
         uuid_line = f"- UUID interno da conta (ad_account): {internal_uuid}"
     else:
@@ -648,7 +699,7 @@ Analise as campanhas desta conta:
 - ID externo da conta: {account["account_id"]}
 - Cliente: {state["client"].get("name", "N/A")} ({state["client"].get("vertical", "")})
 - Período de análise: {date_start} até {date_end}
-
+{campaigns_block}
 Siga a estratégia de coleta definida no sistema e retorne o JSON.
 """.strip()
 
@@ -668,12 +719,29 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
     campaigns_analyzed: list[dict] = parsed.get("campaigns_analyzed", [])
     anomalies: list[dict] = parsed.get("anomalies", [])
 
+    # ── Pós-processamento: resolve UUIDs ausentes via mapa ───────────────────
+    # Se o LLM retornou campaign_id externo no lugar do UUID interno, substitui.
+    if campaign_id_map:
+        for item in campaigns_analyzed + anomalies:
+            ext_id = str(item.get("campaign_id") or "")
+            if (
+                ext_id
+                and _is_invalid_uuid(item.get("campaign_uuid"))
+                and ext_id in campaign_id_map
+            ):
+                item["campaign_uuid"] = campaign_id_map[ext_id]
+
     log.info(
         "analista.done",
         campaigns_analyzed=len(campaigns_analyzed),
         anomalies=len(anomalies),
+        campaign_id_map_size=len(campaign_id_map),
     )
-    return {"campaigns_analyzed": campaigns_analyzed, "anomalies": anomalies}
+    return {
+        "campaigns_analyzed": campaigns_analyzed,
+        "anomalies": anomalies,
+        "campaign_id_map": campaign_id_map,
+    }
 
 # ===========================================================================
 # NÓ 2: ESTRATEGISTA
