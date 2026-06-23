@@ -1,0 +1,54 @@
+# Swarm stack — API pública via Traefik (veltrus-api.ehos.com.br)
+# Uso: docker stack deploy -c deploy/docker-stack.yml veltrus
+# NÃO usar docker compose up — agent standalone roda separado em /opt/veltrus
+
+services:
+  api:
+    image: veltrus:latest
+    networks:
+      - emeverton
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://veltrus_redis:6379/0
+    command:
+      - uvicorn
+      - api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+      resources:
+        limits:
+          memory: 512M
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.veltrus_api.rule=Host(`veltrus-api.ehos.com.br`)
+        - traefik.http.routers.veltrus_api.entrypoints=websecure
+        - traefik.http.routers.veltrus_api.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.veltrus_api.service=veltrus_api
+        - traefik.http.services.veltrus_api.loadbalancer.server.port=8000
+        - traefik.http.services.veltrus_api.loadbalancer.passHostHeader=1
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - emeverton
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      resources:
+        limits:
+          memory: 128M
+
+networks:
+  emeverton:
+    external: true

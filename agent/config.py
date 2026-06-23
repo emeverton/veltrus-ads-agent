@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     debug: bool = True
 
     # Redis / Celery
-    redis_url: str = "redis://localhost:6379/0"
+    redis_url: str = "redis://veltrus_redis:6379/0"
 
     # Brevo (email marketing)
     brevo_api_key: str = ""
