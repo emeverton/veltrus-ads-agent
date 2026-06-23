@@ -4,7 +4,7 @@ Ponto de entrada do agente — executa o grafo para todas as contas de anúncios
 Uso direto:
     python -m agent.run
 
-Via APScheduler / Celery: importar e agendar run_all_accounts().
+Via APScheduler (agent.main): importar e agendar run_all_accounts().
 """
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ from datetime import datetime
 
 import structlog
 
+from agent.config import settings
 from agent.graph import AgentState, compiled_graph
+from agent.graphs.google_agent import run_google_agent
 from agent.tools.supabase_client import supabase
 
 log = structlog.get_logger(__name__)
@@ -36,6 +38,7 @@ async def run_account(account: dict, client: dict) -> None:
         "risk_level": "",
         "risk_reasoning": "",
         "execution_result": {},
+        "campaign_id_map": {},
     }
 
     try:
@@ -64,23 +67,33 @@ async def run_all_accounts() -> None:
     )
     rows = result.data or []
 
-    if not rows:
-        log.warning("run.cycle.no_active_accounts")
-        return
-
-    # Filtra contas cujo cliente também está ativo
-    accounts_to_run = [
+    # Contas Google são processadas pelo google_agent (suporte a conta sintetizada
+    # via .env + modo read-only). Aqui tratamos apenas as demais (Meta).
+    accounts_to_run: list[dict] = [
         row for row in rows
         if (row.get("clients") or {}).get("active", True)
+        and row.get("platform") != "google"
     ]
 
-    log.info("run.cycle.accounts_found", total=len(rows), eligible=len(accounts_to_run))
+    if not rows:
+        log.warning("run.cycle.no_active_accounts")
+    else:
+        log.info("run.cycle.accounts_found", total=len(rows), eligible=len(accounts_to_run))
 
-    errors = 0
     for row in accounts_to_run:
         client = row.pop("clients", {}) or {}
         await run_account(account=row, client=client)
 
+    # Ativa o Google Agent quando GOOGLE_ADS_CUSTOMER_ID está configurado no .env.
+    customer_id = (settings.google_ads_customer_id or "").strip()
+    if customer_id:
+        log.info("google.agent.start", customer_id=customer_id)
+        result = await run_google_agent()
+        log.info("google.agent.done", customer_id=customer_id, result=result)
+    else:
+        log.info("run.cycle.google_disabled", reason="no_customer_id")
+
+    errors = 0
     elapsed = (datetime.utcnow() - started_at).total_seconds()
     log.info(
         "run.cycle.done",

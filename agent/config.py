@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     google_ads_refresh_token: str = ""
     google_ads_customer_id: str = ""
     google_ads_login_customer_id: str = ""
+    # Read-only: quando true, o agente apenas loga ações Google sem executá-las na API.
+    google_ads_read_only: bool = True
 
     # API
     api_host: str = "0.0.0.0"
@@ -37,7 +39,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     debug: bool = True
 
-    # Redis / Celery
+    # Redis / Celery (Swarm: veltrus_redis; dev local: override para localhost)
     redis_url: str = "redis://veltrus_redis:6379/0"
 
     # Brevo (email marketing)

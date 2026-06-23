@@ -8,6 +8,7 @@ Fluxo por conta de anúncios:
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -22,6 +23,12 @@ from typing_extensions import TypedDict
 
 from agent.config import settings
 from agent.tools import google_ads, meta_ads, normalizer
+from agent.tools.campaign_registry import (
+    get_campaign_id_map,
+    merge_campaign_id_map,
+    register_campaigns_safe,
+    set_campaign_id_map,
+)
 from agent.tools.supabase_client import supabase
 
 log = structlog.get_logger(__name__)
@@ -57,6 +64,9 @@ class AgentState(TypedDict):
 
     # EXECUTOR
     execution_result: dict
+
+    # Registro de campanhas (external_id → uuid interno)
+    campaign_id_map: dict[str, str]
 
 # ---------------------------------------------------------------------------
 # Helper: loop de agente com tool use
@@ -102,6 +112,60 @@ async def _agent_loop(
     return ""
 
 
+def _is_invalid_uuid(value: Any) -> bool:
+    """Retorna True para qualquer valor que não seja UUID v4 válido."""
+    if not value:
+        return True
+    try:
+        parsed = uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return True
+    return parsed.version != 4
+
+
+def is_invalid_uuid(value: Any) -> bool:
+    """Alias público usado por testes e integrações."""
+    return _is_invalid_uuid(value)
+
+
+def is_valid_uuid(value: Any) -> bool:
+    """Compatibilidade: inverso de _is_invalid_uuid."""
+    return not _is_invalid_uuid(value)
+
+
+def resolve_campaign_uuid(
+    value: str | None,
+    campaign_id_map: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve UUID interno a partir de ID externo usando o mapa do ciclo."""
+    if not value:
+        return None
+    candidate = str(value).strip()
+    if not _is_invalid_uuid(candidate):
+        return candidate
+    id_map = campaign_id_map if campaign_id_map is not None else get_campaign_id_map()
+    resolved = id_map.get(candidate)
+    if resolved and not _is_invalid_uuid(resolved):
+        return resolved
+    return candidate
+
+
+def _enrich_items_with_campaign_uuids(
+    items: list[dict],
+    campaign_id_map: dict[str, str],
+) -> list[dict]:
+    """Preenche campaign_uuid ausente/inválido com o mapa de registro."""
+    enriched: list[dict] = []
+    for item in items:
+        row = dict(item)
+        if _is_invalid_uuid(row.get("campaign_uuid")):
+            external_id = str(row.get("campaign_id") or "").strip()
+            if external_id in campaign_id_map:
+                row["campaign_uuid"] = campaign_id_map[external_id]
+        enriched.append(row)
+    return enriched
+
+
 def _extract_json(text: str) -> dict:
     """Extrai o primeiro objeto JSON encontrado no texto."""
     start = text.find("{")
@@ -117,8 +181,15 @@ def _extract_json(text: str) -> dict:
 # FERRAMENTAS — ANALISTA
 # ===========================================================================
 @tool
-async def fetch_account_campaigns(ad_account_uuid: str) -> list[dict]:
+async def fetch_account_campaigns(ad_account_uuid: str | None) -> list[dict]:
     """Busca campanhas não-arquivadas de uma conta de anúncios pelo UUID interno."""
+    if _is_invalid_uuid(ad_account_uuid):
+        log.warning(
+            "fetch_campaigns.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return []
     result = (
         supabase.table("campaigns")
         .select("id, campaign_id, name, platform, status, daily_budget")
@@ -138,6 +209,17 @@ async def fetch_daily_metrics(campaign_uuid: str, platform: str = "meta", days: 
     ctr, attribution_window, confidence_score, data_source.
     platform: "meta" | "google" — necessário para normalização correta de seed data.
     """
+    resolved_uuid = resolve_campaign_uuid(campaign_uuid)
+    if _is_invalid_uuid(resolved_uuid):
+        log.warning(
+            "fetch_daily_metrics.skip",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+        )
+        return []
+
+    log.info("fetch_daily_metrics.start", campaign_uuid=resolved_uuid)
+
     since = (datetime.utcnow() - timedelta(days=days)).date().isoformat()
     result = (
         supabase.table("daily_metrics")
@@ -145,7 +227,7 @@ async def fetch_daily_metrics(campaign_uuid: str, platform: str = "meta", days: 
             "date, spend, impressions, clicks, conversions, cpa, roas, ctr, "
             "raw_payload, attribution_window, confidence_score"
         )
-        .eq("campaign_id", campaign_uuid)
+        .eq("campaign_id", resolved_uuid)
         .gte("date", since)
         .order("date", desc=False)
         .execute()
@@ -161,6 +243,13 @@ async def fetch_meta_campaigns_live(ad_account_uuid: str) -> list[dict]:
     Retorna campanhas ativas e pausadas. Preferir sobre fetch_account_campaigns
     quando platform == 'meta'. Retorna lista vazia se a conta não tiver campanhas.
     """
+    if _is_invalid_uuid(ad_account_uuid):
+        log.warning(
+            "fetch_meta_campaigns.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return []
     row = (
         supabase.table("ad_accounts")
         .select("account_id, token")
@@ -169,7 +258,18 @@ async def fetch_meta_campaigns_live(ad_account_uuid: str) -> list[dict]:
         .execute()
     )
     account = row.data or {}
-    return await meta_ads.list_campaigns(account["account_id"], account["token"])
+    campaigns = await meta_ads.list_campaigns(account["account_id"], account["token"])
+    id_map = await register_campaigns_safe(
+        ad_account_uuid,
+        campaigns,
+        "meta",
+        account_external_id=account.get("account_id"),
+    )
+    for campaign in campaigns:
+        internal_uuid = id_map.get(str(campaign.get("campaign_id") or ""))
+        if internal_uuid:
+            campaign["campaign_uuid"] = internal_uuid
+    return campaigns
 
 
 @tool
@@ -185,6 +285,13 @@ async def fetch_meta_insights_live(
     Retorna spend, impressions, clicks, conversions, cpa, roas, ctr.
     Preferir sobre fetch_daily_metrics quando platform == 'meta'.
     """
+    if _is_invalid_uuid(ad_account_uuid):
+        log.warning(
+            "fetch_meta_insights.skip",
+            reason="invalid_uuid",
+            value=ad_account_uuid,
+        )
+        return {}
     row = (
         supabase.table("ad_accounts")
         .select("account_id, token")
@@ -200,6 +307,52 @@ async def fetch_meta_insights_live(
         account_id_clean, campaign_external_id, ds, de, account["token"]
     )
     return normalizer.normalize_insights(insights, platform="meta")
+
+
+def _google_credentials(refresh_token: str = "") -> dict[str, Any]:
+    """Monta as credenciais OAuth do Google Ads a partir do .env (+ refresh_token opcional)."""
+    return {
+        "client_id": settings.google_ads_client_id,
+        "client_secret": settings.google_ads_client_secret,
+        "refresh_token": refresh_token or settings.google_ads_refresh_token,
+        "login_customer_id": settings.google_ads_login_customer_id or None,
+    }
+
+
+@tool
+async def fetch_google_campaigns_live(
+    customer_id: str,
+    ad_account_uuid: str | None = None,
+) -> list[dict]:
+    """Busca campanhas diretamente da Google Ads API (dados em tempo real).
+
+    customer_id: ID da conta Google Ads (sem hífens). Usa as credenciais OAuth do .env.
+    ad_account_uuid: UUID interno da conta no Supabase (opcional; habilita registro automático).
+    Retorna campanhas não-removidas com campaign_id, name, status, campaign_budget_id e
+    daily_budget_usd. Preferir sobre fetch_account_campaigns quando platform == 'google'.
+    """
+    log.info("google.list_campaigns.start", customer_id=customer_id)
+    try:
+        campaigns = await google_ads.get_campaigns(customer_id, _google_credentials())
+    except Exception as exc:
+        log.error("google.list_campaigns.failed", customer_id=customer_id, error=str(exc))
+        return []
+    log.info("google.list_campaigns.done", customer_id=customer_id, total=len(campaigns))
+
+    if ad_account_uuid and not _is_invalid_uuid(ad_account_uuid):
+        id_map = await register_campaigns_safe(
+            ad_account_uuid,
+            campaigns,
+            "google",
+            account_external_id=customer_id,
+        )
+    else:
+        id_map = {}
+    for campaign in campaigns:
+        internal_uuid = id_map.get(str(campaign.get("campaign_id") or ""))
+        if internal_uuid:
+            campaign["campaign_uuid"] = internal_uuid
+    return campaigns
 
 # ===========================================================================
 # FERRAMENTAS — ESTRATEGISTA
@@ -222,8 +375,16 @@ async def search_agent_memory(
         .order("created_at", desc=True)
         .limit(limit)
     )
-    if campaign_uuid:
-        qb = qb.eq("campaign_id", campaign_uuid)
+    if campaign_uuid and _is_invalid_uuid(campaign_uuid):
+        log.warning(
+            "search_agent_memory.skip_campaign_filter",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+        )
+    else:
+        resolved_uuid = resolve_campaign_uuid(campaign_uuid) if campaign_uuid else None
+        if resolved_uuid and not _is_invalid_uuid(resolved_uuid):
+            qb = qb.eq("campaign_id", resolved_uuid)
     result = qb.execute()
     return result.data or []
 
@@ -240,8 +401,22 @@ async def save_decision(
     approved_by: str | None = None,
 ) -> dict:
     """Registra uma decisão do agente em agent_decisions e retorna a linha criada."""
+    resolved_uuid = resolve_campaign_uuid(campaign_uuid)
+    if _is_invalid_uuid(resolved_uuid):
+        log.warning(
+            "estrategista.skip",
+            reason="invalid_uuid",
+            value=campaign_uuid,
+            action_type=action_type,
+        )
+        return {
+            "skipped": True,
+            "reason": "invalid_campaign_uuid",
+            "value": campaign_uuid,
+        }
+
     row: dict[str, Any] = {
-        "campaign_id": campaign_uuid,
+        "campaign_id": resolved_uuid,
         "action_type": action_type,
         "reasoning": reasoning,
         "payload": payload,
@@ -254,7 +429,7 @@ async def save_decision(
         "executor.decision_saved",
         action_type=action_type,
         executed=executed,
-        campaign_uuid=campaign_uuid,
+        campaign_uuid=resolved_uuid,
     )
     return result.data[0] if result.data else {}
 
@@ -308,15 +483,39 @@ async def run_google_action(
     action_type: pause_campaign | activate_campaign | budget_increase | budget_decrease
     amount_micros: obrigatório para ações de budget (USD * 1_000_000).
     """
-    token_row = (
-        supabase.table("ad_accounts")
-        .select("token")
-        .eq("account_id", account_external_id)
-        .eq("platform", "google")
-        .single()
-        .execute()
-    )
-    refresh_token = (token_row.data or {}).get("token", "")
+    # Modo somente-leitura: registra a intenção mas NÃO chama a API do Google.
+    if settings.google_ads_read_only:
+        log.info(
+            "google.action.read_only_skip",
+            action_type=action_type,
+            customer_id=customer_id,
+            campaign_external_id=campaign_external_id,
+        )
+        return {
+            "executed": False,
+            "read_only": True,
+            "action_type": action_type,
+            "customer_id": customer_id,
+            "campaign_external_id": campaign_external_id,
+            "note": "GOOGLE_ADS_READ_ONLY=true — ação registrada mas não executada na API Google",
+        }
+
+    # refresh_token vem da conta no Supabase; cai para o .env quando não houver linha.
+    refresh_token = ""
+    try:
+        token_row = (
+            supabase.table("ad_accounts")
+            .select("token")
+            .eq("account_id", account_external_id)
+            .eq("platform", "google")
+            .maybe_single()
+            .execute()
+        )
+        refresh_token = ((token_row.data if token_row else None) or {}).get("token", "")
+    except Exception as exc:  # pragma: no cover - rede/DB
+        log.warning("google.action.token_lookup_failed", error=str(exc))
+    if not refresh_token:
+        refresh_token = settings.google_ads_refresh_token
     credentials = {
         "client_id": settings.google_ads_client_id,
         "client_secret": settings.google_ads_client_secret,
@@ -402,13 +601,18 @@ async def save_memory(
     campaign_uuid: None = memória global; UUID = específica da campanha.
     embedding é null por enquanto — será preenchido quando o serviço de embeddings for integrado.
     """
+    safe_campaign_uuid = resolve_campaign_uuid(campaign_uuid)
+    if safe_campaign_uuid and _is_invalid_uuid(safe_campaign_uuid):
+        log.warning("memorizador.invalid_campaign_uuid", value=campaign_uuid)
+        safe_campaign_uuid = None
+
     row: dict[str, Any] = {
         "content": content,
         "memory_type": memory_type,
-        "campaign_id": campaign_uuid,
+        "campaign_id": safe_campaign_uuid,
     }
     result = supabase.table("agent_memory").insert(row).execute()
-    log.info("memorizador.memory_saved", memory_type=memory_type, campaign_uuid=campaign_uuid)
+    log.info("memorizador.memory_saved", memory_type=memory_type, campaign_uuid=safe_campaign_uuid)
     return result.data[0] if result.data else {}
 
 # ===========================================================================
@@ -440,6 +644,13 @@ Para platform == 'meta':
   2. Se lista vazia, use fetch_account_campaigns → campanhas do Supabase
   3. Para cada campanha: fetch_meta_insights_live (retorna UnifiedMetrics normalizado)
   4. Se spend_usd == 0, use fetch_daily_metrics(campaign_uuid, platform="meta")
+
+Para platform == 'google':
+  1. fetch_google_campaigns_live(customer_id) → campanhas em tempo real da Google Ads API
+     (customer_id = ID externo da conta). Loga google.list_campaigns.start.
+  2. Se lista vazia e houver UUID interno válido da conta, use fetch_account_campaigns → campanhas do Supabase.
+     Se o UUID interno estiver "não disponível", NÃO chame fetch_account_campaigns.
+  3. Para cada campanha: fetch_daily_metrics(campaign_uuid, platform="google")
 
 Para outras plataformas:
   1. fetch_account_campaigns → campanhas do Supabase
@@ -483,20 +694,100 @@ Retorne EXCLUSIVAMENTE um JSON (sem markdown, sem texto fora do JSON):
 """.strip()
 
 
+def _account_internal_uuid(account: dict) -> str | None:
+    """UUID interno da conta (ad_accounts.id), ou None se indisponível/inválido."""
+    raw = account.get("id")
+    if raw is None:
+        return None
+    candidate = str(raw).strip()
+    return candidate if not _is_invalid_uuid(candidate) else None
+
+
+async def _sync_campaign_registry(account: dict) -> dict[str, str]:
+    """Busca campanhas da API e registra no Supabase antes do ciclo do analista."""
+    platform = account.get("platform")
+    internal_uuid = _account_internal_uuid(account)
+    external_id = str(account.get("account_id") or "")
+
+    if not internal_uuid or platform not in ("meta", "google"):
+        return {}
+
+    campaigns: list[dict] = []
+    try:
+        if platform == "meta":
+            row = (
+                supabase.table("ad_accounts")
+                .select("account_id, token")
+                .eq("id", internal_uuid)
+                .single()
+                .execute()
+            )
+            account_row = row.data or {}
+            campaigns = await meta_ads.list_campaigns(
+                account_row.get("account_id", external_id),
+                account_row.get("token", ""),
+            )
+        else:
+            log.info("google.list_campaigns.start", customer_id=external_id)
+            campaigns = await google_ads.get_campaigns(external_id, _google_credentials())
+            log.info(
+                "google.list_campaigns.done",
+                customer_id=external_id,
+                total=len(campaigns),
+            )
+    except Exception as exc:
+        log.warning(
+            "campaign_registry.fetch_failed",
+            platform=platform,
+            account_id=external_id,
+            error=str(exc),
+        )
+        return {}
+
+    return await register_campaigns_safe(
+        internal_uuid,
+        campaigns,
+        platform,
+        account_external_id=external_id,
+    )
+
+
 async def analista_node(state: AgentState) -> dict:
     account = state["account"]
     log.info("analista.start", account_id=account.get("account_id"), platform=account.get("platform"))
 
+    campaign_id_map = dict(state.get("campaign_id_map") or {})
+    set_campaign_id_map(campaign_id_map)
+    synced_map = await _sync_campaign_registry(account)
+    campaign_id_map = {**campaign_id_map, **synced_map}
+    set_campaign_id_map(campaign_id_map)
+
     date_end   = datetime.utcnow().date()
     date_start = date_end - timedelta(days=7)
 
+    internal_uuid = _account_internal_uuid(account)
+    if internal_uuid:
+        uuid_line = f"- UUID interno da conta (ad_account): {internal_uuid}"
+    else:
+        uuid_line = (
+            "- UUID interno da conta: indisponível (conta sintetizada via .env). "
+            "NÃO chame fetch_account_campaigns nem fetch_meta_campaigns_live."
+        )
+
+    google_uuid_hint = ""
+    if account.get("platform") == "google" and internal_uuid:
+        google_uuid_hint = (
+            f"\n- Ao chamar fetch_google_campaigns_live, passe também "
+            f"ad_account_uuid=\"{internal_uuid}\" para registrar campanhas no Supabase."
+        )
+
     user_prompt = f"""
 Analise as campanhas desta conta:
-- UUID interno da conta (ad_account): {account["id"]}
+{uuid_line}
 - Plataforma: {account["platform"]}
 - ID externo da conta: {account["account_id"]}
 - Cliente: {state["client"].get("name", "N/A")} ({state["client"].get("vertical", "")})
-- Período de análise: {date_start} até {date_end}
+- Período de análise: {date_start} até {date_end}{google_uuid_hint}
 
 Siga a estratégia de coleta definida no sistema e retorne o JSON.
 """.strip()
@@ -507,21 +798,33 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
             fetch_daily_metrics,
             fetch_meta_campaigns_live,
             fetch_meta_insights_live,
+            fetch_google_campaigns_live,
         ],
         system_prompt=_ANALISTA_SYSTEM,
         user_prompt=user_prompt,
     )
 
     parsed = _extract_json(raw)
-    campaigns_analyzed: list[dict] = parsed.get("campaigns_analyzed", [])
-    anomalies: list[dict] = parsed.get("anomalies", [])
+    campaigns_analyzed: list[dict] = _enrich_items_with_campaign_uuids(
+        parsed.get("campaigns_analyzed", []),
+        campaign_id_map,
+    )
+    anomalies: list[dict] = _enrich_items_with_campaign_uuids(
+        parsed.get("anomalies", []),
+        campaign_id_map,
+    )
 
     log.info(
         "analista.done",
         campaigns_analyzed=len(campaigns_analyzed),
         anomalies=len(anomalies),
+        campaign_map_size=len(campaign_id_map),
     )
-    return {"campaigns_analyzed": campaigns_analyzed, "anomalies": anomalies}
+    return {
+        "campaigns_analyzed": campaigns_analyzed,
+        "anomalies": anomalies,
+        "campaign_id_map": campaign_id_map,
+    }
 
 # ===========================================================================
 # NÓ 2: ESTRATEGISTA
@@ -563,6 +866,8 @@ Retorne EXCLUSIVAMENTE um JSON:
 async def estrategista_node(state: AgentState) -> dict:
     anomalies = state["anomalies"]
     client = state["client"]
+    campaign_id_map = state.get("campaign_id_map") or {}
+    set_campaign_id_map(campaign_id_map)
     log.info("estrategista.start", anomalies_count=len(anomalies))
 
     user_prompt = f"""
@@ -592,8 +897,53 @@ Retorne o JSON conforme especificado.
     if not parsed.get("action_type"):
         parsed = {"action_type": "monitor_only", "reasoning": raw, "campaign_uuid": "", "params": {}}
 
+    if _is_invalid_uuid(parsed.get("campaign_uuid")):
+        recovered = _recover_campaign_uuid(parsed, anomalies, campaign_id_map)
+        if recovered:
+            log.info(
+                "estrategista.campaign_uuid_recovered",
+                value=parsed.get("campaign_uuid"),
+                recovered=recovered,
+            )
+            parsed["campaign_uuid"] = recovered
+        else:
+            log.warning(
+                "estrategista.invalid_campaign_uuid",
+                value=parsed.get("campaign_uuid"),
+                action_type=parsed.get("action_type"),
+            )
+            parsed["campaign_uuid"] = None
+            parsed["action_type"] = "monitor_only"
+
     log.info("estrategista.done", action_type=parsed.get("action_type"))
     return {"decision": parsed, "memory_context": []}
+
+
+def _recover_campaign_uuid(
+    decision: dict,
+    anomalies: list[dict],
+    campaign_id_map: dict[str, str] | None = None,
+) -> str | None:
+    """Tenta recuperar um campaign_uuid válido casando a decisão com as anomalias."""
+    ext_id = str(decision.get("campaign_id") or "").strip()
+    name = str(decision.get("campaign_name") or "").strip()
+
+    if ext_id and campaign_id_map and ext_id in campaign_id_map:
+        return campaign_id_map[ext_id]
+
+    for anomaly in anomalies:
+        candidate = anomaly.get("campaign_uuid")
+        if _is_invalid_uuid(candidate):
+            continue
+        if ext_id and str(anomaly.get("campaign_id") or "").strip() == ext_id:
+            return candidate
+        if name and str(anomaly.get("name") or "").strip() == name:
+            return candidate
+
+    valid = [a.get("campaign_uuid") for a in anomalies if not _is_invalid_uuid(a.get("campaign_uuid"))]
+    if len(valid) == 1:
+        return valid[0]
+    return None
 
 # ===========================================================================
 # NÓ 3: REVISOR
@@ -695,6 +1045,7 @@ async def executor_node(state: AgentState) -> dict:
     decision = state["decision"]
     risk_level = state["risk_level"]
     account = state["account"]
+    set_campaign_id_map(state.get("campaign_id_map") or {})
 
     log.info(
         "executor.start",
@@ -763,6 +1114,7 @@ Use save_memory para cada memória. Ao terminar, retorne uma lista JSON:
 
 async def memorizador_node(state: AgentState) -> dict:
     account = state["account"]
+    set_campaign_id_map(state.get("campaign_id_map") or {})
     log.info("memorizador.start", account_id=account.get("account_id"))
 
     user_prompt = f"""
