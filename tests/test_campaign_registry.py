@@ -222,3 +222,85 @@ async def test_fetch_meta_campaigns_live_registers_campaigns(mocker):
 
     register.assert_awaited_once()
     assert out[0]["campaign_uuid"] == CAMPAIGN_UUID
+
+
+# ---------------------------------------------------------------------------
+# Attribution Loop — get_campaign_real_roas
+# ---------------------------------------------------------------------------
+
+def test_get_campaign_real_roas_returns_zeros_for_invalid_uuid():
+    """UUIDs inválidos retornam zeros sem levantar exceção."""
+    assert campaign_registry.get_campaign_real_roas("n/a") == {
+        "revenue_closed": 0,
+        "leads_total": 0,
+        "deals_closed": 0,
+    }
+    assert campaign_registry.get_campaign_real_roas("") == {
+        "revenue_closed": 0,
+        "leads_total": 0,
+        "deals_closed": 0,
+    }
+    assert campaign_registry.get_campaign_real_roas(None) == {  # type: ignore[arg-type]
+        "revenue_closed": 0,
+        "leads_total": 0,
+        "deals_closed": 0,
+    }
+    assert campaign_registry.get_campaign_real_roas("not-a-uuid") == {
+        "revenue_closed": 0,
+        "leads_total": 0,
+        "deals_closed": 0,
+    }
+
+
+def test_get_campaign_real_roas_returns_attribution_data(mocker):
+    """UUID válido com dado no Supabase retorna dict completo."""
+    fake_supabase = mocker.patch.object(campaign_registry, "supabase")
+    (
+        fake_supabase.table.return_value
+        .select.return_value
+        .eq.return_value
+        .single.return_value
+        .execute.return_value
+    ).data = {
+        "revenue_closed": 1500.00,
+        "leads_total": 10,
+        "deals_closed": 3,
+    }
+
+    result = campaign_registry.get_campaign_real_roas(CAMPAIGN_UUID)
+
+    assert result["revenue_closed"] == 1500.00
+    assert result["leads_total"] == 10
+    assert result["deals_closed"] == 3
+    fake_supabase.table.assert_called_once_with("campaign_attribution")
+
+
+def test_get_campaign_real_roas_returns_zeros_on_exception(mocker):
+    """Erros de banco retornam zeros sem propagar exceção."""
+    fake_supabase = mocker.patch.object(campaign_registry, "supabase")
+    fake_supabase.table.side_effect = RuntimeError("db unavailable")
+
+    log_spy = mocker.spy(campaign_registry.log, "warning")
+
+    result = campaign_registry.get_campaign_real_roas(CAMPAIGN_UUID)
+
+    assert result == {"revenue_closed": 0, "leads_total": 0, "deals_closed": 0}
+    events = [c.args[0] for c in log_spy.call_args_list if c.args]
+    assert "attribution.real_roas.failed" in events
+
+
+def test_get_campaign_real_roas_handles_empty_data(mocker):
+    """Quando Supabase retorna None em .data, retorna dict vazio (sem zeros forçados)."""
+    fake_supabase = mocker.patch.object(campaign_registry, "supabase")
+    (
+        fake_supabase.table.return_value
+        .select.return_value
+        .eq.return_value
+        .single.return_value
+        .execute.return_value
+    ).data = None
+
+    result = campaign_registry.get_campaign_real_roas(CAMPAIGN_UUID)
+
+    # data = None → {} → gets retornados são os valores de .get com default 0
+    assert result == {}
