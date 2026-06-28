@@ -23,6 +23,10 @@ from typing_extensions import TypedDict
 
 from agent.config import settings
 from agent.tools import google_ads, meta_ads, normalizer
+from agent.tools.bigquery_attribution import (
+    get_campaign_real_roas,
+    sync_campaign_spend_to_bq,
+)
 from agent.tools.campaign_registry import (
     get_campaign_id_map,
     merge_campaign_id_map,
@@ -672,7 +676,11 @@ Retorne EXCLUSIVAMENTE um JSON (sem markdown, sem texto fora do JSON):
       "avg_cpa_click": 12.50,
       "avg_roas_click": 2.1,
       "avg_ctr": 0.032,
-      "last_spend_usd": 45.0
+      "last_spend_usd": 45.0,
+      "roas_real": null,
+      "revenue_real": 0.0,
+      "leads_total": 0,
+      "deals_closed": 0
     }
   ],
   "anomalies": [
@@ -813,6 +821,21 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
         parsed.get("anomalies", []),
         campaign_id_map,
     )
+
+    # Enriquecer campanhas com attribution real (BigQuery → fallback Supabase)
+    for campaign in campaigns_analyzed:
+        ext_id = str(campaign.get("campaign_id") or "").strip()
+        uuid = campaign.get("campaign_uuid") or campaign_id_map.get(ext_id)
+        campaign["_uuid"] = uuid
+        if uuid and not _is_invalid_uuid(uuid):
+            attr = get_campaign_real_roas(uuid)
+            campaign["roas_real"]    = attr.get("roas_real")
+            campaign["revenue_real"] = attr.get("revenue_real", 0.0)
+            campaign["leads_total"]  = attr.get("leads_total", 0)
+            campaign["deals_closed"] = attr.get("deals_closed", 0)
+
+    # Sincroniza spend ao BigQuery (analítico — silencioso em caso de falha)
+    sync_campaign_spend_to_bq(campaigns_analyzed)
 
     log.info(
         "analista.done",
