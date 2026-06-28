@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from agent.config import settings
-from api.routers import decisions, run, run_email
+from api.routers import analytics, decisions, leads, run, run_email
 
 app = FastAPI(
     title="Veltrus Ads Agent API",
@@ -40,12 +40,13 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
 # Routers
 # ---------------------------------------------------------------------------
 app.include_router(decisions.router)
+app.include_router(analytics.router)
+app.include_router(leads.router)
 app.include_router(run.router)
 app.include_router(run_email.router, prefix="/run-email", tags=["email"])
 
 # TODO: add when implemented
 # app.include_router(campaigns.router)
-# app.include_router(analytics.router)
 # app.include_router(agents.router)
 # app.include_router(webhooks.router)
 

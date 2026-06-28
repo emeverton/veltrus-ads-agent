@@ -29,6 +29,10 @@ from agent.tools.campaign_registry import (
     register_campaigns_safe,
     set_campaign_id_map,
 )
+from agent.tools.bigquery_attribution import (
+    get_campaign_real_roas,
+    sync_campaign_spend_to_bq,
+)
 from agent.tools.supabase_client import supabase
 
 log = structlog.get_logger(__name__)
@@ -813,6 +817,27 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
         parsed.get("anomalies", []),
         campaign_id_map,
     )
+
+    for campaign in campaigns_analyzed:
+        ext_id = str(campaign.get("campaign_id") or campaign.get("id") or "")
+        uuid_key = campaign.get("campaign_uuid") or campaign_id_map.get(ext_id)
+        campaign["_uuid"] = uuid_key
+        if uuid_key and not _is_invalid_uuid(uuid_key):
+            attr = get_campaign_real_roas(uuid_key)
+            campaign["roas_real"] = attr.get("roas_real")
+            campaign["revenue_real"] = attr.get("revenue_real", 0)
+            campaign["leads_total"] = attr.get("leads_total", 0)
+            campaign["deals_closed"] = attr.get("deals_closed", 0)
+            if campaign["roas_real"] is None:
+                spend = campaign.get("spend") or campaign.get("last_spend_usd")
+                revenue = campaign.get("revenue_real", 0) or 0
+                campaign["roas_real"] = (
+                    round(revenue / spend, 2)
+                    if spend and revenue > 0
+                    else None
+                )
+
+    sync_campaign_spend_to_bq(campaigns_analyzed)
 
     log.info(
         "analista.done",

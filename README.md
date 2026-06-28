@@ -45,7 +45,8 @@ O Veltrus Ads Agent é um sistema multi-agente que monitora, analisa e otimiza c
 | Agente       | Python + LangGraph            | Orquestração multi-agente e lógica de IA |
 | LLM          | Anthropic Claude (claude-sonnet-4-6) | Raciocínio e tomada de decisão     |
 | API          | FastAPI                       | Interface REST + WebSocket para dashboard |
-| Banco        | Supabase (Postgres)           | Dados, autenticação e memória persistente |
+| Banco        | Supabase (Postgres)           | Dados operacionais, autenticação e memória persistente |
+| Analytics    | BigQuery                      | Camada BI para Attribution Loop e ROAS real |
 | Frontend     | Next.js 14 + Tailwind + shadcn | Dashboard de visualização e controle     |
 
 ## Estrutura de Pastas
@@ -108,6 +109,63 @@ python -m agent.main
 ## Variáveis de Ambiente
 
 Veja `.env.example` para a lista completa de variáveis necessárias.
+
+## Attribution Loop + BigQuery Analytics Layer
+
+O Attribution Loop fecha o ciclo `campanha → lead → deal fechado → receita real → ROAS real`.
+
+### Fluxo operacional
+
+```
+Ads Platform / Landing Page
+  └─ cria lead com campaign_id / crm_deal_id
+       └─ Supabase leads
+            └─ Kommo deal won → n8n
+                 └─ GET /leads?crm_deal_id=...
+                      └─ INSERT deals
+                           └─ public.campaign_attribution
+                                └─ public.analytics_campaign_daily
+                                     └─ POST /analytics/bigquery/sync
+                                          └─ BigQuery campaign_daily_performance
+```
+
+### Views Supabase
+
+| View | Função |
+|------|--------|
+| `campaign_attribution` | Receita fechada, leads e deals por campanha. |
+| `analytics_campaign_daily` | Métricas diárias de ads + cliente/conta/campanha + receita real para BI/BigQuery. |
+
+As views usam `security_invoker=true`; o acesso de API continua via `SUPABASE_SERVICE_ROLE_KEY` no backend.
+
+### Endpoints
+
+Todos requerem `X-API-Key: {API_SECRET_KEY}`.
+
+| Método | Path | Descrição |
+|--------|------|-----------|
+| `GET` | `/analytics/campaign-daily?since=YYYY-MM-DD&limit=5000` | Lista linhas normalizadas da view analítica. |
+| `POST` | `/analytics/bigquery/sync` | Exporta para BigQuery com MERGE idempotente por `analytics_key`. |
+
+Exemplo dry-run:
+
+```bash
+curl -X POST http://localhost:8000/analytics/bigquery/sync \
+  -H "X-API-Key: $API_SECRET_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"since":"2026-06-01","limit":1000,"dry_run":true}'
+```
+
+Para ativar export real:
+
+```bash
+GOOGLE_CLOUD_PROJECT=veltrus-ads-agent
+GCP_PROJECT_ID=veltrus-ads-agent
+BIGQUERY_ENABLED=true
+BIGQUERY_DATASET=veltrus_analytics
+BIGQUERY_CAMPAIGN_DAILY_TABLE=campaign_daily_performance
+GOOGLE_APPLICATION_CREDENTIALS=/secure/path/service-account.json
+```
 
 ## API de Decisões — Aprovação Humana
 
