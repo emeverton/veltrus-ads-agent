@@ -29,6 +29,10 @@ from agent.tools.campaign_registry import (
     register_campaigns_safe,
     set_campaign_id_map,
 )
+from agent.tools.bigquery_attribution import (
+    get_campaign_real_roas,
+    sync_campaign_spend_to_bq,
+)
 from agent.tools.supabase_client import supabase
 
 log = structlog.get_logger(__name__)
@@ -162,6 +166,31 @@ def _enrich_items_with_campaign_uuids(
             external_id = str(row.get("campaign_id") or "").strip()
             if external_id in campaign_id_map:
                 row["campaign_uuid"] = campaign_id_map[external_id]
+        enriched.append(row)
+    return enriched
+
+
+def _enrich_items_with_real_attribution(
+    items: list[dict],
+    campaign_id_map: dict[str, str],
+) -> list[dict]:
+    """Adiciona métricas reais de attribution sem quebrar o ciclo se analytics falhar."""
+    enriched: list[dict] = []
+    for item in items:
+        row = dict(item)
+        external_id = str(row.get("campaign_id") or row.get("id") or "").strip()
+        campaign_uuid = row.get("campaign_uuid")
+        if _is_invalid_uuid(campaign_uuid):
+            campaign_uuid = campaign_id_map.get(external_id)
+        if campaign_uuid and not _is_invalid_uuid(campaign_uuid):
+            row["_uuid"] = campaign_uuid
+            attr = get_campaign_real_roas(str(campaign_uuid))
+            row["roas_real"] = attr.get("roas_real")
+            row["roas_plataforma"] = attr.get("roas_plataforma")
+            row["revenue_real"] = attr.get("revenue_real", 0)
+            row["leads_total"] = attr.get("leads_total", 0)
+            row["deals_closed"] = attr.get("deals_closed", 0)
+            row["total_spend"] = attr.get("total_spend", 0)
         enriched.append(row)
     return enriched
 
@@ -671,6 +700,10 @@ Retorne EXCLUSIVAMENTE um JSON (sem markdown, sem texto fora do JSON):
       "avg_confidence": 0.75,
       "avg_cpa_click": 12.50,
       "avg_roas_click": 2.1,
+      "roas_real": null,
+      "revenue_real": 0,
+      "leads_total": 0,
+      "deals_closed": 0,
       "avg_ctr": 0.032,
       "last_spend_usd": 45.0
     }
@@ -813,6 +846,15 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
         parsed.get("anomalies", []),
         campaign_id_map,
     )
+    campaigns_analyzed = _enrich_items_with_real_attribution(
+        campaigns_analyzed,
+        campaign_id_map,
+    )
+    anomalies = _enrich_items_with_real_attribution(
+        anomalies,
+        campaign_id_map,
+    )
+    sync_campaign_spend_to_bq(campaigns_analyzed)
 
     log.info(
         "analista.done",
