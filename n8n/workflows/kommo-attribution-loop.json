@@ -1,0 +1,219 @@
+{
+  "name": "Kommo → Attribution Loop",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "kommo-deal-won",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "kommo-deal-won-webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "kommo-deal-won"
+    },
+    {
+      "parameters": {
+        "url": "https://veltrus-api.ehos.com.br/leads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "crm_deal_id",
+              "value": "={{ $json.body.deal_id || $json.body.leads?.status?.[0]?.id || $json.body.leads?.add?.[0]?.id || $json.query.deal_id }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.VELTRUS_API_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "lookup-lead-by-crm-deal",
+      "name": "Lookup Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ Boolean($json.id) }}",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "lead-found-check",
+      "name": "Lead Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_REST_URL + \"/deals\" }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "={{ \"Bearer \" + $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=representation"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_id\": $json.id,\n  \"campaign_id\": $json.campaign_id,\n  \"client_id\": $json.client_id,\n  \"crm_deal_id\": $(\"Webhook\").first().json.body.deal_id || $(\"Webhook\").first().json.body.leads?.status?.[0]?.id || $(\"Webhook\").first().json.body.leads?.add?.[0]?.id,\n  \"revenue_amount\": Number($(\"Webhook\").first().json.body.deal_value || $(\"Webhook\").first().json.body.leads?.status?.[0]?.price || $(\"Webhook\").first().json.body.leads?.add?.[0]?.price || 0),\n  \"closed_at\": $now.toISO()\n}",
+        "options": {}
+      },
+      "id": "insert-closed-deal",
+      "name": "Insert Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        780,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"status\": \"ok\" }",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1040,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{ \"status\": \"ok\", \"lead_found\": false }",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "respond-no-lead",
+      "name": "Respond No Lead",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        780,
+        120
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Lookup Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Lead": {
+      "main": [
+        [
+          {
+            "node": "Lead Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lead Found?": {
+      "main": [
+        [
+          {
+            "node": "Insert Deal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond No Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Deal": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "20260616-attribution-loop",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    {
+      "name": "attribution-loop"
+    },
+    {
+      "name": "kommo"
+    }
+  ]
+}

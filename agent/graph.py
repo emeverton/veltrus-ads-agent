@@ -25,6 +25,7 @@ from agent.config import settings
 from agent.tools import google_ads, meta_ads, normalizer
 from agent.tools.campaign_registry import (
     get_campaign_id_map,
+    get_campaign_real_roas,
     merge_campaign_id_map,
     register_campaigns_safe,
     set_campaign_id_map,
@@ -162,6 +163,50 @@ def _enrich_items_with_campaign_uuids(
             external_id = str(row.get("campaign_id") or "").strip()
             if external_id in campaign_id_map:
                 row["campaign_uuid"] = campaign_id_map[external_id]
+        enriched.append(row)
+    return enriched
+
+
+def _to_float(value: Any) -> float:
+    """Converte números vindos do Supabase/API para float sem quebrar o ciclo."""
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _enrich_items_with_real_attribution(
+    items: list[dict],
+    campaign_id_map: dict[str, str],
+    real_cache: dict[str, dict],
+) -> list[dict]:
+    """Adiciona receita/ROAS real do CRM mantendo métricas de plataforma intactas."""
+    enriched: list[dict] = []
+    for item in items:
+        row = dict(item)
+        ext_id = str(row.get("campaign_id") or row.get("id") or "").strip()
+        campaign_uuid = row.get("campaign_uuid") or campaign_id_map.get(ext_id)
+
+        if campaign_uuid and not _is_invalid_uuid(campaign_uuid):
+            if campaign_uuid not in real_cache:
+                real_cache[campaign_uuid] = get_campaign_real_roas(str(campaign_uuid))
+            real = real_cache[campaign_uuid]
+            revenue_real = _to_float(real.get("revenue_closed", 0))
+            spend = _to_float(
+                row.get("spend")
+                or row.get("last_spend_usd")
+                or row.get("spend_usd")
+            )
+
+            row["revenue_real"] = revenue_real
+            row["leads_total"] = real.get("leads_total", 0)
+            row["deals_closed"] = real.get("deals_closed", 0)
+            row["roas_real"] = (
+                round(revenue_real / spend, 2)
+                if spend > 0 and revenue_real > 0
+                else None
+            )
+
         enriched.append(row)
     return enriched
 
@@ -812,6 +857,17 @@ Siga a estratégia de coleta definida no sistema e retorne o JSON.
     anomalies: list[dict] = _enrich_items_with_campaign_uuids(
         parsed.get("anomalies", []),
         campaign_id_map,
+    )
+    real_cache: dict[str, dict] = {}
+    campaigns_analyzed = _enrich_items_with_real_attribution(
+        campaigns_analyzed,
+        campaign_id_map,
+        real_cache,
+    )
+    anomalies = _enrich_items_with_real_attribution(
+        anomalies,
+        campaign_id_map,
+        real_cache,
     )
 
     log.info(
